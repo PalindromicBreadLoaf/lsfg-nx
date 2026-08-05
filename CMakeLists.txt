@@ -14,6 +14,7 @@ include(LsfgVersion)
 
 option(LSFG_BUILD_HOST_TESTS "Build portable host unit tests" ${BUILD_TESTING})
 option(LSFG_BUILD_SWITCH_APPS "Build the Nintendo Switch applications" ${NINTENDO_SWITCH})
+option(LSFG_BUILD_HOST_TOOLS "Build the portable development tools" ON)
 
 if(LSFG_BUILD_SWITCH_APPS AND NOT NINTENDO_SWITCH)
     message(FATAL_ERROR "LSFG_BUILD_SWITCH_APPS requires the devkitPro Switch toolchain")
@@ -45,6 +46,10 @@ if(LSFG_BUILD_SWITCH_APPS)
     add_subdirectory(runtime/plugin)
     add_subdirectory(overlay/lsfg-overlay)
     add_subdirectory(packaging)
+endif()
+
+if(LSFG_BUILD_HOST_TOOLS AND NOT CMAKE_CROSSCOMPILING)
+    add_subdirectory(tools/inspect)
 endif()
 
 if(LSFG_BUILD_HOST_TESTS AND NOT CMAKE_CROSSCOMPILING)
