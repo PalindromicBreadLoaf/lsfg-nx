@@ -45,7 +45,7 @@ jobs:
         run: |
           dkp-pacman -Syu --noconfirm
           dkp-pacman -S --noconfirm --needed \
-            deko3d switch-curl switch-zlib switch-minizip switch-mbedtls
+            deko3d switch-curl switch-zlib switch-mbedtls
 
       - name: Configure
         run: cmake --preset switch-release
