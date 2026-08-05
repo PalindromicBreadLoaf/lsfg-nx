@@ -4,11 +4,13 @@
 #pragma once
 
 #include <lsfg/common/error.hpp>
+#include <lsfg/common/sha256.hpp>
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string_view>
 
 namespace lsfg::cache {
 
@@ -17,6 +19,10 @@ inline constexpr std::uint32_t manifest_magic = 0x4746'534CU; // "LSFG"
 // Bump on any change to the manifest layout or to what the runtime expects a
 // cached module to contain.
 inline constexpr std::uint32_t abi_version = 1;
+
+// Bump whenever extraction could select different shaders or hand different
+// bytes to the translator for the same DLL.
+inline constexpr std::uint32_t extractor_version = 1;
 
 inline constexpr std::size_t digest_size = 32;
 inline constexpr std::size_t revision_size = 20;
@@ -75,6 +81,18 @@ static_assert(sizeof(ManifestHeader) == 112);
 static_assert(sizeof(PassEntry) == 80);
 static_assert(alignof(ManifestHeader) == 8);
 static_assert(alignof(PassEntry) == 8);
+
+struct CacheKeyInputs {
+    std::span<const std::uint8_t> dll_bytes;
+    std::uint32_t extractor_version{};
+    std::string_view spirv_cross_revision;
+    std::string_view uam_revision;
+    std::uint32_t translation_options{};
+    std::uint32_t backend_abi_version{};
+};
+
+// Names the directory a prepared cache is written to.
+[[nodiscard]] Digest cache_key(const CacheKeyInputs& inputs) noexcept;
 
 [[nodiscard]] std::uint32_t crc32(std::span<const std::uint8_t> data, std::uint32_t seed = 0) noexcept;
 

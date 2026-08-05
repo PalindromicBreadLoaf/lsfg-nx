@@ -24,6 +24,17 @@ std::uint32_t crc32(const std::span<const std::uint8_t> data, const std::uint32_
     return ~remainder;
 }
 
+Digest cache_key(const CacheKeyInputs& inputs) noexcept {
+    Sha256 hasher;
+    hasher.update_field(inputs.dll_bytes);
+    hasher.update_field(inputs.extractor_version);
+    hasher.update_field(inputs.spirv_cross_revision);
+    hasher.update_field(inputs.uam_revision);
+    hasher.update_field(inputs.translation_options);
+    hasher.update_field(inputs.backend_abi_version);
+    return hasher.finish();
+}
+
 void initialize(ManifestHeader& header) noexcept {
     header = ManifestHeader{};
     header.magic = manifest_magic;
