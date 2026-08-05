@@ -1,0 +1,23 @@
+// Copyright 2026 PalindromicBreadLoaf (palindromicbreadloaf@tuta.com)
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+// Generated from version.hpp.in. Do not edit the generated copy.
+
+#pragma once
+
+#include <cstdint>
+#include <string_view>
+
+namespace lsfg::version {
+
+inline constexpr std::string_view project = "@PROJECT_VERSION@";
+inline constexpr std::string_view git_revision = "@LSFG_GIT_REVISION@";
+inline constexpr std::string_view build_type = "@CMAKE_BUILD_TYPE@";
+inline constexpr std::string_view compiler = "@CMAKE_CXX_COMPILER_ID@ @CMAKE_CXX_COMPILER_VERSION@";
+
+inline constexpr std::string_view saltynx_revision = "@LSFG_SALTYNX_COMMIT@";
+inline constexpr std::string_view libultrahand_revision = "@LSFG_LIBULTRAHAND_COMMIT@";
+
+inline constexpr bool dirty = @LSFG_GIT_DIRTY@;
+
+} // namespace lsfg::version
