@@ -8,7 +8,7 @@ if(NOT LSFG_MBEDTLS_INCLUDE_DIR)
     message(
         STATUS
         "Skipping the overlay: switch-mbedtls is not installed. "
-        "Install it with '(dkp-)pacman -S switch-curl switch-zlib switch-minizip switch-mbedtls'"
+        "Install it with '(dkp-)pacman -S switch-curl switch-zlib switch-mbedtls'"
     )
     return()
 endif()
@@ -21,6 +21,7 @@ add_library(
     lsfg_overlay_framework STATIC
     ${libultra_sources}
     "${LSFG_LIBULTRAHAND_SOURCE_DIR}/libtesla/source/tesla.cpp"
+    "${LSFG_LIBULTRAHAND_SOURCE_DIR}/common/cJSON.c"
 )
 
 target_include_directories(
