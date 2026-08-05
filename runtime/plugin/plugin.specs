@@ -1,0 +1,18 @@
+# Copyright 2026 PalindromicBreadLoaf (palindromicbreadloaf@tuta.com)
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# libnx's own switch.specs, minus two flags.
+#
+#   --no-dynamic-linker          marks the output as needing no runtime linker,
+#                                which makes ld discard the weak imports the
+#                                SaltySD loader has to resolve
+#   -z nodynamic-undefined-weak  resolves those same imports to zero at static
+#                                link time
+#
+# Everything else is libnx's.
+
+*link:
++ -T %:getenv(DEVKITPRO /libnx/switch.ld) -pie --spare-dynamic-tags=0 --gc-sections -z text -z now -z pack-relative-relocs --build-id=sha1 --nx-module-name
+
+*startfile:
+crti%O%s crtbegin%O%s --require-defined=main
