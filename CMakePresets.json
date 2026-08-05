@@ -1,0 +1,87 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 22,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "host-debug",
+      "displayName": "Host checks (Debug)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/host-debug",
+      "environment": {
+        "CCACHE_DIR": "${sourceDir}/build/.ccache"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "BUILD_TESTING": "ON",
+        "LSFG_BUILD_HOST_TESTS": "ON",
+        "LSFG_BUILD_SWITCH_APPS": "OFF"
+      }
+    },
+    {
+      "name": "switch-debug",
+      "displayName": "Nintendo Switch (Debug)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/switch-debug",
+      "toolchainFile": "$env{DEVKITPRO}/cmake/Switch.cmake",
+      "environment": {
+        "CCACHE_DIR": "${sourceDir}/build/.ccache"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "BUILD_TESTING": "OFF",
+        "LSFG_BUILD_HOST_TESTS": "OFF",
+        "LSFG_BUILD_SWITCH_APPS": "ON"
+      }
+    },
+    {
+      "name": "switch-release",
+      "displayName": "Nintendo Switch (Release)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/switch-release",
+      "toolchainFile": "$env{DEVKITPRO}/cmake/Switch.cmake",
+      "environment": {
+        "CCACHE_DIR": "${sourceDir}/build/.ccache"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_TESTING": "OFF",
+        "LSFG_BUILD_HOST_TESTS": "OFF",
+        "LSFG_BUILD_SWITCH_APPS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "host-debug",
+      "configurePreset": "host-debug"
+    },
+    {
+      "name": "switch-debug",
+      "configurePreset": "switch-debug"
+    },
+    {
+      "name": "switch-release",
+      "configurePreset": "switch-release"
+    },
+    {
+      "name": "switch-package",
+      "configurePreset": "switch-release",
+      "targets": [
+        "sd-package"
+      ]
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "host-debug",
+      "configurePreset": "host-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}
