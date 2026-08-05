@@ -1,0 +1,33 @@
+# Build cache and IDE tools
+/build/
+/build-*/
+/out/
+/.cache/
+/.idea/
+/.vscode/
+compile_commands.json
+
+# Generated artifacts
+*.elf
+*.nacp
+*.nro
+*.nso
+*.npdm
+*.ovl
+*.dksh
+/dist/
+/stage/
+
+# LSFG
+Lossless.dll
+**/Lossless.dll
+/cache/
+**/cache/
+/dumps/
+/captures/
+*.spv
+
+# Diagnostics
+*.local.ini
+*.diagnostic.json
+
