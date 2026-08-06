@@ -61,6 +61,12 @@ enum ExecutionMode : std::uint32_t {
 
 constexpr std::uint32_t built_in_workgroup_size = 25;
 
+[[nodiscard]] constexpr bool is_spec_constant(const std::uint16_t opcode) noexcept {
+    return opcode == op_spec_constant_true || opcode == op_spec_constant_false
+        || opcode == op_spec_constant || opcode == op_spec_constant_composite
+        || opcode == op_spec_constant_op;
+}
+
 struct IdRecord {
     std::uint16_t opcode{};
     std::uint32_t operand0{};
@@ -341,7 +347,6 @@ ErrorCode inspect(const std::span<const std::uint32_t> words, Inventory& out) {
                 case decoration_built_in:
                     if (operands.size() >= 3 && operands[2] == built_in_workgroup_size) {
                         record->workgroup_size_built_in = true;
-                        out.local_size_is_specialised = true;
                     }
                     break;
                 default:
@@ -428,6 +433,12 @@ ErrorCode inspect(const std::span<const std::uint32_t> words, Inventory& out) {
     std::ranges::sort(out.bindings, [](const Binding& left, const Binding& right) {
         return left.set != right.set ? left.set < right.set : left.binding < right.binding;
     });
+
+    for (const IdRecord& record : ids) {
+        if (record.workgroup_size_built_in && is_spec_constant(record.opcode)) {
+            out.local_size_is_specialised = true;
+        }
+    }
 
     for (std::uint32_t id = 0; id < ids.size(); ++id) {
         const IdRecord& record = ids[id];
