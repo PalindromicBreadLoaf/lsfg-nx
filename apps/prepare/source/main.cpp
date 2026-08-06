@@ -2,11 +2,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <lsfg/common/cache_format.hpp>
+#include <lsfg/common/dksh.hpp>
 #include <lsfg/common/pe_resources.hpp>
 #include <lsfg/common/ring_log.hpp>
 #include <lsfg/common/sha256.hpp>
 #include <lsfg/common/shader_set.hpp>
 #include <lsfg/common/spirv_module.hpp>
+#include <lsfg/common/translate.hpp>
+#include <lsfg/common/version.hpp>
 
 #include <switch.h>
 
@@ -64,7 +67,7 @@ const lsfg::pe::Resource* find_module(
     return nullptr;
 }
 
-// Everything up to the point where translation and compilation would begin.
+// Everything up to the point where a cache would be written.
 bool inspect_dll() {
     const std::vector<std::uint8_t> image = read_dll();
     if (image.empty()) {
@@ -82,8 +85,8 @@ bool inspect_dll() {
     const lsfg::DigestHex key = lsfg::to_hex(lsfg::cache::cache_key(lsfg::cache::CacheKeyInputs{
         .dll_bytes = image,
         .extractor_version = lsfg::cache::extractor_version,
-        .spirv_cross_revision = "",
-        .uam_revision = "",
+        .spirv_cross_revision = lsfg::version::spirv_cross_revision,
+        .uam_revision = lsfg::version::uam_revision,
         .translation_options = 0,
         .backend_abi_version = lsfg::cache::abi_version,
     }));
@@ -119,8 +122,15 @@ bool inspect_dll() {
         return false;
     }
 
-    std::uint32_t highest_binding = 0;
-    std::uint32_t unformatted_storage_images = 0;
+    std::printf("%zu modules resolved for the chain\n\n", requests.size());
+    consoleUpdate(nullptr);
+
+    std::size_t glsl_bytes = 0;
+    std::size_t dksh_bytes = 0;
+    std::uint32_t worst_gprs = 0;
+    std::uint32_t worst_scratch = 0;
+    const std::uint64_t started = armGetSystemTick();
+
     for (const lsfg::shaders::ModuleRequest& request : requests) {
         const lsfg::pe::Resource* const resource = find_module(table, request.resource_id);
         if (resource == nullptr) {
@@ -128,32 +138,63 @@ bool inspect_dll() {
             return false;
         }
 
-        lsfg::spirv::Inventory inventory;
+        const std::span<const std::uint8_t> data = lsfg::pe::resource_data(image, *resource);
+
+        std::printf("%-10.*s", static_cast<int>(request.name.size()), request.name.data());
+        consoleUpdate(nullptr);
+
+        lsfg::translate::Module module;
         if (const lsfg::ErrorCode result
-            = lsfg::spirv::inspect_bytes(lsfg::pe::resource_data(image, *resource), inventory);
+            = lsfg::translate::to_glsl(data, lsfg::translate::Options{}, module);
             !lsfg::succeeded(result)) {
-            report_failure(result, "module inspection");
+            report_failure(result, "translation");
             return false;
         }
 
-        const lsfg::spirv::DescriptorCounts counts = lsfg::spirv::count_descriptors(inventory);
-        highest_binding = std::max(highest_binding, counts.highest_binding);
-
-        for (const lsfg::spirv::Binding& binding : inventory.bindings) {
-            if (binding.kind == lsfg::spirv::ResourceKind::storage_image
-                && binding.image_format == static_cast<std::uint32_t>(lsfg::spirv::ImageFormat::unknown)) {
-                ++unformatted_storage_images;
-            }
+        lsfg::dksh::Blob blob;
+        if (const lsfg::ErrorCode result = lsfg::dksh::compile(module.glsl, blob);
+            !lsfg::succeeded(result)) {
+            std::printf("\n%s\n", blob.log.c_str());
+            report_failure(result, "compilation");
+            return false;
         }
+
+        // A dispatch sized from the manifest is only correct if the workgroup
+        // size came through SPIR-V, GLSL, and DKSH unchanged.
+        if (blob.program.block_dim_x != module.local_size_x
+            || blob.program.block_dim_y != module.local_size_y
+            || blob.program.block_dim_z != module.local_size_z) {
+            report_failure(lsfg::ErrorCode::shader_interface_mismatch, "workgroup size check");
+            return false;
+        }
+
+        glsl_bytes += module.glsl.size();
+        dksh_bytes += blob.bytes.size();
+        worst_gprs = std::max(worst_gprs, blob.program.gprs);
+        worst_scratch = std::max(worst_scratch, blob.program.per_warp_scratch_bytes);
+
+        std::printf(
+            " %6zu B GLSL  %5zu B DKSH  %3u regs\n",
+            module.glsl.size(),
+            blob.bytes.size(),
+            blob.program.gprs);
+        consoleUpdate(nullptr);
     }
 
-    std::printf("%zu modules resolved for the chain\n", requests.size());
-    std::printf("highest binding slot %u\n", highest_binding);
-    std::printf("%u storage images need a format before translation\n", unformatted_storage_images);
-    message_log.push(armGetSystemTick(), lsfg::LogLevel::info, lsfg::ErrorCode::ok, "inventory complete");
+    const std::uint64_t elapsed_ms
+        = armTicksToNs(armGetSystemTick() - started) / 1'000'000ULL;
 
-    std::printf("\nTranslation and compilation are not implemented yet,\n");
-    std::printf("so no cache was written.\n");
+    std::printf(
+        "\n%zu modules: %zu B of GLSL, %zu B of DKSH in %llu ms\n",
+        requests.size(),
+        glsl_bytes,
+        dksh_bytes,
+        static_cast<unsigned long long>(elapsed_ms));
+    std::printf("most registers %u, most scratch %u B per warp\n", worst_gprs, worst_scratch);
+    message_log.push(armGetSystemTick(), lsfg::LogLevel::info, lsfg::ErrorCode::ok, "chain compiled");
+
+    // TODO: write the DKSH modules and a manifest to the cache directory.
+    std::printf("\nNo cache was written.\n");
     return true;
 }
 
