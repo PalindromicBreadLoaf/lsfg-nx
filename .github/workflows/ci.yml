@@ -39,7 +39,7 @@ jobs:
       - name: Install build tools
         run: |
           apt-get update
-          apt-get install -y cmake ninja-build
+          apt-get install -y cmake ninja-build bison flex python3
 
       - name: Install Switch packages
         run: |
