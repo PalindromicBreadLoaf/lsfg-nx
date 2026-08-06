@@ -18,6 +18,9 @@ inline constexpr std::string_view compiler = "@CMAKE_CXX_COMPILER_ID@ @CMAKE_CXX
 inline constexpr std::string_view saltynx_revision = "@LSFG_SALTYNX_COMMIT@";
 inline constexpr std::string_view libultrahand_revision = "@LSFG_LIBULTRAHAND_COMMIT@";
 
+inline constexpr std::string_view spirv_cross_revision = "@LSFG_SPIRV_CROSS_COMMIT@";
+inline constexpr std::string_view uam_revision = "@LSFG_UAM_COMMIT@";
+
 inline constexpr bool dirty = @LSFG_GIT_DIRTY@;
 
 } // namespace lsfg::version

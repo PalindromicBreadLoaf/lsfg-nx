@@ -15,6 +15,7 @@ include(LsfgVersion)
 option(LSFG_BUILD_HOST_TESTS "Build portable host unit tests" ${BUILD_TESTING})
 option(LSFG_BUILD_SWITCH_APPS "Build the Nintendo Switch applications" ${NINTENDO_SWITCH})
 option(LSFG_BUILD_HOST_TOOLS "Build the portable development tools" ON)
+option(LSFG_BUILD_UAM "Build the uam GLSL to DKSH compiler" ${LSFG_BUILD_SWITCH_APPS})
 
 if(LSFG_BUILD_SWITCH_APPS AND NOT NINTENDO_SWITCH)
     message(FATAL_ERROR "LSFG_BUILD_SWITCH_APPS requires the devkitPro Switch toolchain")
@@ -35,11 +36,17 @@ target_compile_options(
         $<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Wconversion;-Wsign-conversion;-ffile-prefix-map=${PROJECT_SOURCE_DIR}=.;-ffile-prefix-map=${PROJECT_BINARY_DIR}=build>
 )
 
+include(LsfgDependencies)
+include(LsfgSpirvCross)
+
+if(LSFG_BUILD_UAM)
+    include(LsfgUam)
+endif()
+
 add_subdirectory(common)
 
 if(LSFG_BUILD_SWITCH_APPS)
     enable_language(ASM)
-    include(LsfgDependencies)
 
     add_subdirectory(apps/prepare)
     add_subdirectory(apps/test-pattern)
