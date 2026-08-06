@@ -28,6 +28,29 @@ add_library(lsfg::shader_set ALIAS lsfg_shader_set)
 target_include_directories(lsfg_shader_set PUBLIC shader-set/include)
 target_link_libraries(lsfg_shader_set PUBLIC lsfg::pe lsfg::spirv lsfg_project_options)
 
+add_library(lsfg_translate STATIC translate/src/translate.cpp)
+add_library(lsfg::translate ALIAS lsfg_translate)
+target_include_directories(lsfg_translate PUBLIC translate/include)
+target_link_libraries(
+    lsfg_translate
+    PUBLIC lsfg::error lsfg::spirv lsfg_project_options
+    PRIVATE lsfg::spirv_cross
+)
+
+if(LSFG_BUILD_UAM)
+    set(_dksh_compile dksh/src/compile_uam.cpp)
+else()
+    set(_dksh_compile dksh/src/compile_absent.cpp)
+endif()
+
+add_library(lsfg_dksh STATIC dksh/src/dksh.cpp ${_dksh_compile})
+add_library(lsfg::dksh ALIAS lsfg_dksh)
+target_include_directories(lsfg_dksh PUBLIC dksh/include)
+target_link_libraries(lsfg_dksh PUBLIC lsfg::error lsfg_project_options)
+if(LSFG_BUILD_UAM)
+    target_link_libraries(lsfg_dksh PRIVATE lsfg::uam)
+endif()
+
 add_library(lsfg_protocol STATIC protocol/src/protocol.cpp)
 add_library(lsfg::protocol ALIAS lsfg_protocol)
 target_include_directories(lsfg_protocol PUBLIC protocol/include)
