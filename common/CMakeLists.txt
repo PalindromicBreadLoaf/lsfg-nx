@@ -28,6 +28,11 @@ add_library(lsfg::shader_set ALIAS lsfg_shader_set)
 target_include_directories(lsfg_shader_set PUBLIC shader-set/include)
 target_link_libraries(lsfg_shader_set PUBLIC lsfg::pe lsfg::spirv lsfg_project_options)
 
+add_library(lsfg_image_graph STATIC image-graph/src/image_graph.cpp)
+add_library(lsfg::image_graph ALIAS lsfg_image_graph)
+target_include_directories(lsfg_image_graph PUBLIC image-graph/include)
+target_link_libraries(lsfg_image_graph PUBLIC lsfg::error lsfg::shader_set lsfg_project_options)
+
 add_library(lsfg_translate STATIC translate/src/translate.cpp)
 add_library(lsfg::translate ALIAS lsfg_translate)
 target_include_directories(lsfg_translate PUBLIC translate/include)

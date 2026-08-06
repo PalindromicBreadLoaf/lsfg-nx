@@ -22,6 +22,27 @@ target_link_libraries(
 )
 add_test(NAME lsfg_extraction_tests COMMAND lsfg_extraction_tests)
 
+add_executable(lsfg_graph_tests graph_tests.cpp)
+target_link_libraries(
+    lsfg_graph_tests
+    PRIVATE
+        lsfg::image_graph
+        lsfg::shader_set
+        lsfg_project_options
+)
+add_test(NAME lsfg_graph_tests COMMAND lsfg_graph_tests)
+
+add_executable(lsfg_cache_tests cache_tests.cpp)
+target_link_libraries(
+    lsfg_cache_tests
+    PRIVATE
+        lsfg::cache_store
+        lsfg::image_graph
+        lsfg::shader_set
+        lsfg_project_options
+)
+add_test(NAME lsfg_cache_tests COMMAND lsfg_cache_tests)
+
 add_executable(lsfg_translation_tests translation_tests.cpp)
 target_link_libraries(
     lsfg_translation_tests
