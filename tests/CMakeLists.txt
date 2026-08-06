@@ -21,3 +21,14 @@ target_link_libraries(
         lsfg_project_options
 )
 add_test(NAME lsfg_extraction_tests COMMAND lsfg_extraction_tests)
+
+add_executable(lsfg_translation_tests translation_tests.cpp)
+target_link_libraries(
+    lsfg_translation_tests
+    PRIVATE
+        lsfg::dksh
+        lsfg::spirv
+        lsfg::translate
+        lsfg_project_options
+)
+add_test(NAME lsfg_translation_tests COMMAND lsfg_translation_tests)
