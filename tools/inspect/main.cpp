@@ -5,10 +5,12 @@
 // DLL and reports what the preparation app would find in it.
 
 #include <lsfg/common/cache_format.hpp>
+#include <lsfg/common/dksh.hpp>
 #include <lsfg/common/pe_resources.hpp>
 #include <lsfg/common/sha256.hpp>
 #include <lsfg/common/shader_set.hpp>
 #include <lsfg/common/spirv_module.hpp>
+#include <lsfg/common/translate.hpp>
 #include <lsfg/common/version.hpp>
 
 #include <algorithm>
@@ -28,7 +30,9 @@ namespace {
 struct Options {
     std::filesystem::path dll;
     std::filesystem::path dump_directory;
+    std::filesystem::path glsl_directory;
     bool list_all{};
+    bool translate{};
     bool valid{};
 };
 
@@ -38,8 +42,13 @@ Options parse_arguments(const std::span<const std::string_view> arguments) {
         const std::string_view argument = arguments[index];
         if (argument == "--all") {
             options.list_all = true;
+        } else if (argument == "--translate") {
+            options.translate = true;
         } else if (argument == "--dump" && index + 1U < arguments.size()) {
             options.dump_directory = arguments[++index];
+        } else if (argument == "--glsl" && index + 1U < arguments.size()) {
+            options.glsl_directory = arguments[++index];
+            options.translate = true;
         } else if (argument.starts_with("--")) {
             return options;
         } else if (options.dll.empty()) {
@@ -113,6 +122,21 @@ void print_bindings(const lsfg::spirv::Inventory& inventory) {
     }
 }
 
+void print_slots(const lsfg::translate::Module& module) {
+    for (const lsfg::translate::SlotAssignment& slot : module.slots) {
+        std::cout << "        " << std::setw(14) << std::left
+                  << lsfg::translate::slot_kind_name(slot.kind) << std::right << std::setw(3)
+                  << slot.slot << "  from binding " << std::setw(3) << slot.spirv_binding;
+        if (slot.kind == lsfg::translate::SlotKind::texture) {
+            std::cout << " with sampler " << std::setw(3) << slot.spirv_sampler_binding;
+            if (slot.uses_dummy_sampler) {
+                std::cout << " (introduced)";
+            }
+        }
+        std::cout << '\n';
+    }
+}
+
 int report(const Options& options) {
     const std::vector<std::uint8_t> image = read_file(options.dll);
     if (image.empty()) {
@@ -125,13 +149,11 @@ int report(const Options& options) {
               << "size      " << image.size() << " bytes\n"
               << "sha256    " << lsfg::to_hex(digest).data() << '\n';
 
-    // The revisions are placeholders until the translator and compiler are
-    // wired in.
     const lsfg::Digest key = lsfg::cache::cache_key(lsfg::cache::CacheKeyInputs{
         .dll_bytes = image,
         .extractor_version = lsfg::cache::extractor_version,
-        .spirv_cross_revision = "",
-        .uam_revision = "",
+        .spirv_cross_revision = lsfg::version::spirv_cross_revision,
+        .uam_revision = lsfg::version::uam_revision,
         .translation_options = 0,
         .backend_abi_version = lsfg::cache::abi_version,
     });
@@ -215,6 +237,18 @@ int report(const Options& options) {
     std::vector<std::uint32_t> unique_capabilities;
     bool any_specialised_workgroup = false;
 
+    lsfg::translate::Module worst_translation;
+    std::uint32_t modules_translated = 0;
+    std::uint32_t modules_needing_a_dummy_sampler = 0;
+    std::uint32_t storage_images_formatted = 0;
+    std::size_t glsl_bytes = 0;
+
+    std::uint32_t modules_compiled = 0;
+    std::size_t dksh_bytes = 0;
+    std::uint32_t worst_gprs = 0;
+    std::uint32_t worst_scratch = 0;
+    std::uint32_t worst_shared_memory = 0;
+
     const auto account = [&](const lsfg::spirv::Inventory& inventory) {
         const lsfg::spirv::DescriptorCounts counts = lsfg::spirv::count_descriptors(inventory);
         worst.samplers = std::max(worst.samplers, counts.samplers);
@@ -258,6 +292,78 @@ int report(const Options& options) {
         }
         account(inventory);
 
+        if (options.translate) {
+            lsfg::translate::Module module;
+            if (const lsfg::ErrorCode result
+                = lsfg::translate::to_glsl(data, lsfg::translate::Options{}, module);
+                !lsfg::succeeded(result)) {
+                std::cerr << "module " << request.resource_id
+                          << " did not translate: " << lsfg::error_name(result) << '\n';
+                return EXIT_FAILURE;
+            }
+
+            ++modules_translated;
+            glsl_bytes += module.glsl.size();
+            modules_needing_a_dummy_sampler += module.needed_dummy_sampler ? 1U : 0U;
+            storage_images_formatted += module.patch.images_formatted;
+
+            worst_translation.texture_count
+                = std::max(worst_translation.texture_count, module.texture_count);
+            worst_translation.storage_image_count
+                = std::max(worst_translation.storage_image_count, module.storage_image_count);
+            worst_translation.uniform_buffer_count
+                = std::max(worst_translation.uniform_buffer_count, module.uniform_buffer_count);
+
+            std::cout << "        " << module.glsl.size() << " bytes of GLSL, "
+                      << module.texture_count << " textures, " << module.storage_image_count
+                      << " storage images, " << module.uniform_buffer_count << " uniform buffers\n";
+            if (options.list_all) {
+                print_slots(module);
+            }
+
+            if (!options.glsl_directory.empty()) {
+                std::filesystem::create_directories(options.glsl_directory);
+                std::ofstream out(options.glsl_directory / (std::string{request.name} + ".comp"));
+                out << module.glsl;
+            }
+
+            if (lsfg::dksh::compiler_available()) {
+                lsfg::dksh::Blob blob;
+                const lsfg::ErrorCode result = lsfg::dksh::compile(module.glsl, blob);
+                if (!lsfg::succeeded(result)) {
+                    std::cerr << "module " << request.resource_id
+                              << " did not compile: " << lsfg::error_name(result) << '\n'
+                              << blob.log << '\n';
+                    return EXIT_FAILURE;
+                }
+
+                // The workgroup size has to survive SPIR-V, GLSL, and DKSH
+                // unchanged, else every dispatch this module takes part in is
+                // sized wrongly.
+                if (blob.program.block_dim_x != module.local_size_x
+                    || blob.program.block_dim_y != module.local_size_y
+                    || blob.program.block_dim_z != module.local_size_z) {
+                    std::cerr << "module " << request.resource_id
+                              << " changed workgroup size in translation\n";
+                    return EXIT_FAILURE;
+                }
+
+                ++modules_compiled;
+                dksh_bytes += blob.bytes.size();
+                worst_gprs = std::max(worst_gprs, blob.program.gprs);
+                worst_scratch = std::max(worst_scratch, blob.program.per_warp_scratch_bytes);
+                worst_shared_memory
+                    = std::max(worst_shared_memory, blob.program.shared_memory_bytes);
+
+                std::cout << "        " << blob.bytes.size() << " bytes of DKSH, "
+                          << blob.program.gprs << " registers, "
+                          << blob.program.per_warp_scratch_bytes << " B scratch per warp\n";
+                if (!blob.log.empty()) {
+                    std::cout << blob.log;
+                }
+            }
+        }
+
         if (!options.dump_directory.empty()) {
             std::filesystem::create_directories(options.dump_directory);
             const std::filesystem::path path
@@ -277,6 +383,35 @@ int report(const Options& options) {
               << "  highest set      " << worst.highest_set << '\n'
               << "  highest binding  " << worst.highest_binding << '\n'
               << "  specialised workgroup size " << (any_specialised_workgroup ? "yes" : "no") << '\n';
+
+    if (options.translate) {
+        const lsfg::translate::Limits limits = lsfg::translate::Options{}.limits;
+        std::cout << "\ntranslation to GLSL:\n"
+                  << "  modules          " << modules_translated << " of " << requests.size() << '\n'
+                  << "  total GLSL       " << glsl_bytes << " bytes\n"
+                  << "  textures         " << worst_translation.texture_count << " of "
+                  << limits.textures << '\n'
+                  << "  storage images   " << worst_translation.storage_image_count << " of "
+                  << limits.storage_images << '\n'
+                  << "  uniform buffers  " << worst_translation.uniform_buffer_count << " of "
+                  << limits.uniform_buffers << '\n'
+                  << "  storage images given a format  " << storage_images_formatted << '\n'
+                  << "  modules needing a sampler for an unsampled image  "
+                  << modules_needing_a_dummy_sampler << '\n';
+
+        if (lsfg::dksh::compiler_available()) {
+            std::cout << "\ncompilation to DKSH:\n"
+                      << "  modules          " << modules_compiled << " of " << requests.size()
+                      << '\n'
+                      << "  total DKSH       " << dksh_bytes << " bytes\n"
+                      << "  most registers   " << worst_gprs << '\n'
+                      << "  most scratch     " << worst_scratch << " bytes per warp\n"
+                      << "  most shared mem  " << worst_shared_memory << " bytes\n";
+        } else {
+            std::cout << "\nthis build has no GLSL to DKSH compiler."
+                         " Configure with -DLSFG_BUILD_UAM=ON to add it\n";
+        }
+    }
 
     std::ranges::sort(unique_capabilities);
     std::cout << "\ncapabilities declared anywhere in the chain:\n";
@@ -305,7 +440,8 @@ int main(const int argc, const char* const* const argv) {
     const Options options = parse_arguments(arguments);
     if (!options.valid) {
         std::cerr << "lsfg-inspect " << lsfg::version::git_revision << '\n'
-                  << "usage: lsfg-inspect <Lossless.dll> [--all] [--dump <directory>]\n";
+                  << "usage: lsfg-inspect <Lossless.dll> [--all] [--translate]\n"
+                     "                    [--dump <directory>] [--glsl <directory>]\n";
         return EXIT_FAILURE;
     }
 
