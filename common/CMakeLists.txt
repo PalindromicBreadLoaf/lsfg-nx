@@ -56,6 +56,21 @@ if(LSFG_BUILD_UAM)
     target_link_libraries(lsfg_dksh PRIVATE lsfg::uam)
 endif()
 
+add_library(lsfg_preparation STATIC prepare/src/prepare.cpp)
+add_library(lsfg::prepare ALIAS lsfg_preparation)
+target_include_directories(lsfg_preparation PUBLIC prepare/include)
+target_link_libraries(
+    lsfg_preparation
+    PUBLIC
+        lsfg::cache_store
+        lsfg::dksh
+        lsfg::pe
+        lsfg::shader_set
+        lsfg::translate
+        lsfg::version
+        lsfg_project_options
+)
+
 add_library(lsfg_protocol STATIC protocol/src/protocol.cpp)
 add_library(lsfg::protocol ALIAS lsfg_protocol)
 target_include_directories(lsfg_protocol PUBLIC protocol/include)
