@@ -31,6 +31,15 @@ struct ShaderSet {
 // it to a shader that has no performance variant addresses an unrelated one.
 inline constexpr std::uint32_t performance_offset = 23;
 
+// Every module in the set uses descriptor set 0 with one fixed range per kind,
+// dense from its base, so a binding says both what a resource is and where it
+// sits among the ones of its kind.
+inline constexpr std::uint32_t binding_range = 16;
+inline constexpr std::uint32_t binding_base_uniform_buffer = 0;
+inline constexpr std::uint32_t binding_base_sampler = 16;
+inline constexpr std::uint32_t binding_base_image = 32;
+inline constexpr std::uint32_t binding_base_storage_image = 48;
+
 // The block indices the interpolation chain dispatches. Several chain slots
 // share a module; the names follow the stages the chain runs in order.
 struct ChainSlot {
