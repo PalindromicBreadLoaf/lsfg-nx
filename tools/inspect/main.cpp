@@ -1,12 +1,15 @@
 // Copyright 2026 PalindromicBreadLoaf (palindromicbreadloaf@tuta.com)
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// Host-side counterpart of the preparation app's extraction stage. It reads a
-// DLL and reports what the preparation app would find in it.
+// Host-side counterpart of the preparation app. It reads a DLL and reports what
+// the preparation app would find in it, and on request produces the same cache.
 
 #include <lsfg/common/cache_format.hpp>
+#include <lsfg/common/cache_store.hpp>
 #include <lsfg/common/dksh.hpp>
+#include <lsfg/common/image_graph.hpp>
 #include <lsfg/common/pe_resources.hpp>
+#include <lsfg/common/prepare.hpp>
 #include <lsfg/common/sha256.hpp>
 #include <lsfg/common/shader_set.hpp>
 #include <lsfg/common/spirv_module.hpp>
@@ -20,6 +23,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <span>
 #include <string>
 #include <string_view>
@@ -31,8 +35,12 @@ struct Options {
     std::filesystem::path dll;
     std::filesystem::path dump_directory;
     std::filesystem::path glsl_directory;
+    std::filesystem::path cache_directory;
+    lsfg::graph::Extent extent{.width = 1280, .height = 720};
     bool list_all{};
     bool translate{};
+    bool performance{};
+    bool graph{};
     bool valid{};
 };
 
@@ -44,10 +52,17 @@ Options parse_arguments(const std::span<const std::string_view> arguments) {
             options.list_all = true;
         } else if (argument == "--translate") {
             options.translate = true;
+        } else if (argument == "--performance") {
+            options.performance = true;
+        } else if (argument == "--graph") {
+            options.graph = true;
         } else if (argument == "--dump" && index + 1U < arguments.size()) {
             options.dump_directory = arguments[++index];
         } else if (argument == "--glsl" && index + 1U < arguments.size()) {
             options.glsl_directory = arguments[++index];
+            options.translate = true;
+        } else if (argument == "--cache" && index + 1U < arguments.size()) {
+            options.cache_directory = arguments[++index];
             options.translate = true;
         } else if (argument.starts_with("--")) {
             return options;
@@ -122,19 +137,118 @@ void print_bindings(const lsfg::spirv::Inventory& inventory) {
     }
 }
 
-void print_slots(const lsfg::translate::Module& module) {
-    for (const lsfg::translate::SlotAssignment& slot : module.slots) {
-        std::cout << "        " << std::setw(14) << std::left
-                  << lsfg::translate::slot_kind_name(slot.kind) << std::right << std::setw(3)
-                  << slot.slot << "  from binding " << std::setw(3) << slot.spirv_binding;
-        if (slot.kind == lsfg::translate::SlotKind::texture) {
-            std::cout << " with sampler " << std::setw(3) << slot.spirv_sampler_binding;
-            if (slot.uses_dummy_sampler) {
-                std::cout << " (introduced)";
+void print_slots(const std::span<const lsfg::cache::SlotEntry> slots) {
+    for (const lsfg::cache::SlotEntry& slot : slots) {
+        const auto kind = static_cast<lsfg::translate::SlotKind>(slot.kind);
+        std::cout << "        " << std::setw(14) << std::left << lsfg::translate::slot_kind_name(kind)
+                  << std::right << std::setw(3) << static_cast<int>(slot.slot) << "  resource "
+                  << std::setw(3) << static_cast<int>(slot.ordinal);
+        if (kind == lsfg::translate::SlotKind::texture) {
+            if (slot.sampler_ordinal == lsfg::cache::introduced_sampler) {
+                std::cout << " with an introduced sampler";
+            } else {
+                std::cout << " with sampler " << static_cast<int>(slot.sampler_ordinal);
             }
         }
         std::cout << '\n';
     }
+}
+
+void print_graph(const lsfg::graph::Graph& graph, const lsfg::graph::Extent extent) {
+    const lsfg::graph::Extent flow = lsfg::graph::flow_extent(graph.config, extent);
+
+    std::map<std::string, std::uint32_t> per_stage;
+    for (const lsfg::graph::DispatchEntry& dispatch : graph.dispatches) {
+        const std::string name{lsfg::shaders::chain_slots()[dispatch.slot].name};
+        per_stage[name.substr(0, name.find('.'))] += 1U;
+    }
+
+    std::uint32_t prepass = 0;
+    for (const lsfg::graph::DispatchEntry& dispatch : graph.dispatches) {
+        prepass += dispatch.stage == lsfg::graph::prepass_stage ? 1U : 0U;
+    }
+
+    std::cout << "\nimage graph:\n"
+              << "  dispatches       " << graph.dispatches.size() << " per generated frame, " << prepass
+              << " of them shared\n"
+              << "  descriptor sets  " << graph.variants.size() << '\n'
+              << "  images           " << graph.images.size() << '\n'
+              << "  uniform buffers  " << graph.uniform_buffer_count << '\n';
+
+    std::cout << "  per stage        ";
+    for (const auto& [stage, count] : per_stage) {
+        std::cout << stage << ' ' << count << "  ";
+    }
+    std::cout << '\n';
+
+    std::map<std::string, std::uint64_t> per_format;
+    std::uint32_t widest = 0;
+    std::uint32_t narrowest = 0xFFFF'FFFFU;
+    for (const lsfg::graph::ImageDesc& desc : graph.images) {
+        const auto role = static_cast<lsfg::graph::ImageRole>(desc.role);
+        if (role == lsfg::graph::ImageRole::history || role == lsfg::graph::ImageRole::generated) {
+            continue;
+        }
+
+        const lsfg::graph::Extent size = lsfg::graph::evaluate(desc, extent, flow);
+        per_format[std::string{lsfg::graph::format_name(static_cast<lsfg::graph::Format>(desc.format))}]
+            += static_cast<std::uint64_t>(size.width) * size.height
+            * lsfg::graph::bytes_per_pixel(static_cast<lsfg::graph::Format>(desc.format));
+        widest = std::max(widest, size.width);
+        narrowest = std::min(narrowest, size.width);
+    }
+
+    const std::uint64_t memory = lsfg::graph::owned_memory_bytes(graph, extent);
+    std::cout << "\nat " << extent.width << 'x' << extent.height << ":\n"
+              << "  chain memory     " << (memory / 1024U) << " KiB\n"
+              << "  widest image     " << widest << " px\n"
+              << "  narrowest image  " << narrowest << " px\n";
+    for (const auto& [format, bytes] : per_format) {
+        std::cout << "  " << std::setw(16) << std::left << format << std::right << (bytes / 1024U)
+                  << " KiB\n";
+    }
+}
+
+int write_cache(const Options& options, const lsfg::prepare::Result& result) {
+    const std::string directory
+        = lsfg::prepare::directory_for(options.cache_directory.string(), result);
+
+    lsfg::cache::Contents contents = result.contents;
+
+    lsfg::cache::Loaded existing;
+    if (lsfg::succeeded(lsfg::cache::read(directory, existing))) {
+        const lsfg::cache::Comparison comparison = lsfg::cache::compare(existing, contents);
+        std::cout << "\nagainst the cache already here:\n";
+        if (comparison.identical()) {
+            std::cout << "  all " << comparison.modules << " modules identical\n";
+        } else if (!comparison.same_shape) {
+            std::cout << "  a different set of modules, not the same chain\n";
+        } else {
+            std::cout << "  " << comparison.differing_modules << " of " << comparison.modules
+                      << " modules differ, " << comparison.differing_bytes << " bytes in total\n";
+        }
+    }
+
+    if (const lsfg::ErrorCode code = lsfg::cache::write(directory, contents); !lsfg::succeeded(code)) {
+        std::cerr << "cache not written: " << lsfg::error_name(code) << '\n';
+        return EXIT_FAILURE;
+    }
+
+    lsfg::cache::Loaded loaded;
+    if (const lsfg::ErrorCode code = lsfg::cache::read(directory, loaded); !lsfg::succeeded(code)) {
+        std::cerr << "the cache just written does not read back: " << lsfg::error_name(code) << '\n';
+        return EXIT_FAILURE;
+    }
+    if (!lsfg::cache::same_modules(loaded, contents)) {
+        std::cerr << "the cache just written does not hold what was compiled\n";
+        return EXIT_FAILURE;
+    }
+
+    std::cout << "\ncache written to " << directory << '\n'
+              << "  " << loaded.passes.size() << " modules and a manifest, read back and verified\n"
+              << "  it holds compiled shaders derived from a proprietary DLL"
+                 " and must not be published\n";
+    return EXIT_SUCCESS;
 }
 
 int report(const Options& options) {
@@ -143,6 +257,10 @@ int report(const Options& options) {
         std::cerr << "cannot read " << options.dll << '\n';
         return EXIT_FAILURE;
     }
+
+    lsfg::prepare::Options preparation;
+    preparation.graph.performance = options.performance;
+    preparation.keep_glsl = !options.glsl_directory.empty();
 
     const lsfg::Digest digest = lsfg::sha256(image);
     std::cout << "file      " << options.dll.string() << '\n'
@@ -154,7 +272,9 @@ int report(const Options& options) {
         .extractor_version = lsfg::cache::extractor_version,
         .spirv_cross_revision = lsfg::version::spirv_cross_revision,
         .uam_revision = lsfg::version::uam_revision,
-        .translation_options = 0,
+        .translation_options = preparation.translation.glsl_version,
+        .graph_options
+        = lsfg::cache::pack_options(lsfg::cache::Precision::high, preparation.graph),
         .backend_abi_version = lsfg::cache::abi_version,
     });
     std::cout << "cache key " << lsfg::to_hex(key).data() << "\n\n";
@@ -223,8 +343,8 @@ int report(const Options& options) {
               << " block positions hold equally sized modules in both blocks\n\n";
 
     std::vector<lsfg::shaders::ModuleRequest> requests;
-    if (const lsfg::ErrorCode result
-        = lsfg::shaders::required_modules(set, lsfg::shaders::Precision::high, false, requests);
+    if (const lsfg::ErrorCode result = lsfg::shaders::required_modules(
+            set, lsfg::shaders::Precision::high, options.performance, requests);
         !lsfg::succeeded(result)) {
         std::cerr << "chain does not fit the detected set: " << lsfg::error_name(result) << '\n';
         return EXIT_FAILURE;
@@ -236,38 +356,6 @@ int report(const Options& options) {
     lsfg::spirv::DescriptorCounts worst{};
     std::vector<std::uint32_t> unique_capabilities;
     bool any_specialised_workgroup = false;
-
-    lsfg::translate::Module worst_translation;
-    std::uint32_t modules_translated = 0;
-    std::uint32_t modules_needing_a_dummy_sampler = 0;
-    std::uint32_t storage_images_formatted = 0;
-    std::size_t glsl_bytes = 0;
-
-    std::uint32_t modules_compiled = 0;
-    std::size_t dksh_bytes = 0;
-    std::uint32_t worst_gprs = 0;
-    std::uint32_t worst_scratch = 0;
-    std::uint32_t worst_shared_memory = 0;
-
-    const auto account = [&](const lsfg::spirv::Inventory& inventory) {
-        const lsfg::spirv::DescriptorCounts counts = lsfg::spirv::count_descriptors(inventory);
-        worst.samplers = std::max(worst.samplers, counts.samplers);
-        worst.sampled_images = std::max(worst.sampled_images, counts.sampled_images);
-        worst.separate_images = std::max(worst.separate_images, counts.separate_images);
-        worst.storage_images = std::max(worst.storage_images, counts.storage_images);
-        worst.uniform_buffers = std::max(worst.uniform_buffers, counts.uniform_buffers);
-        worst.storage_buffers = std::max(worst.storage_buffers, counts.storage_buffers);
-        worst.highest_set = std::max(worst.highest_set, counts.highest_set);
-        worst.highest_binding = std::max(worst.highest_binding, counts.highest_binding);
-
-        any_specialised_workgroup = any_specialised_workgroup || inventory.local_size_is_specialised;
-
-        for (const std::uint32_t capability : inventory.capabilities) {
-            if (std::ranges::find(unique_capabilities, capability) == unique_capabilities.end()) {
-                unique_capabilities.push_back(capability);
-            }
-        }
-    };
 
     std::cout << "high-precision modules the chain needs:\n";
     for (const lsfg::shaders::ModuleRequest& request : requests) {
@@ -290,77 +378,21 @@ int report(const Options& options) {
         if (options.list_all) {
             print_bindings(inventory);
         }
-        account(inventory);
 
-        if (options.translate) {
-            lsfg::translate::Module module;
-            if (const lsfg::ErrorCode result
-                = lsfg::translate::to_glsl(data, lsfg::translate::Options{}, module);
-                !lsfg::succeeded(result)) {
-                std::cerr << "module " << request.resource_id
-                          << " did not translate: " << lsfg::error_name(result) << '\n';
-                return EXIT_FAILURE;
-            }
+        const lsfg::spirv::DescriptorCounts counts = lsfg::spirv::count_descriptors(inventory);
+        worst.samplers = std::max(worst.samplers, counts.samplers);
+        worst.sampled_images = std::max(worst.sampled_images, counts.sampled_images);
+        worst.separate_images = std::max(worst.separate_images, counts.separate_images);
+        worst.storage_images = std::max(worst.storage_images, counts.storage_images);
+        worst.uniform_buffers = std::max(worst.uniform_buffers, counts.uniform_buffers);
+        worst.storage_buffers = std::max(worst.storage_buffers, counts.storage_buffers);
+        worst.highest_set = std::max(worst.highest_set, counts.highest_set);
+        worst.highest_binding = std::max(worst.highest_binding, counts.highest_binding);
+        any_specialised_workgroup = any_specialised_workgroup || inventory.local_size_is_specialised;
 
-            ++modules_translated;
-            glsl_bytes += module.glsl.size();
-            modules_needing_a_dummy_sampler += module.needed_dummy_sampler ? 1U : 0U;
-            storage_images_formatted += module.patch.images_formatted;
-
-            worst_translation.texture_count
-                = std::max(worst_translation.texture_count, module.texture_count);
-            worst_translation.storage_image_count
-                = std::max(worst_translation.storage_image_count, module.storage_image_count);
-            worst_translation.uniform_buffer_count
-                = std::max(worst_translation.uniform_buffer_count, module.uniform_buffer_count);
-
-            std::cout << "        " << module.glsl.size() << " bytes of GLSL, "
-                      << module.texture_count << " textures, " << module.storage_image_count
-                      << " storage images, " << module.uniform_buffer_count << " uniform buffers\n";
-            if (options.list_all) {
-                print_slots(module);
-            }
-
-            if (!options.glsl_directory.empty()) {
-                std::filesystem::create_directories(options.glsl_directory);
-                std::ofstream out(options.glsl_directory / (std::string{request.name} + ".comp"));
-                out << module.glsl;
-            }
-
-            if (lsfg::dksh::compiler_available()) {
-                lsfg::dksh::Blob blob;
-                const lsfg::ErrorCode result = lsfg::dksh::compile(module.glsl, blob);
-                if (!lsfg::succeeded(result)) {
-                    std::cerr << "module " << request.resource_id
-                              << " did not compile: " << lsfg::error_name(result) << '\n'
-                              << blob.log << '\n';
-                    return EXIT_FAILURE;
-                }
-
-                // The workgroup size has to survive SPIR-V, GLSL, and DKSH
-                // unchanged, else every dispatch this module takes part in is
-                // sized wrongly.
-                if (blob.program.block_dim_x != module.local_size_x
-                    || blob.program.block_dim_y != module.local_size_y
-                    || blob.program.block_dim_z != module.local_size_z) {
-                    std::cerr << "module " << request.resource_id
-                              << " changed workgroup size in translation\n";
-                    return EXIT_FAILURE;
-                }
-
-                ++modules_compiled;
-                dksh_bytes += blob.bytes.size();
-                worst_gprs = std::max(worst_gprs, blob.program.gprs);
-                worst_scratch = std::max(worst_scratch, blob.program.per_warp_scratch_bytes);
-                worst_shared_memory
-                    = std::max(worst_shared_memory, blob.program.shared_memory_bytes);
-
-                std::cout << "        " << blob.bytes.size() << " bytes of DKSH, "
-                          << blob.program.gprs << " registers, "
-                          << blob.program.per_warp_scratch_bytes << " B scratch per warp\n";
-                if (!blob.log.empty()) {
-                    std::cout << blob.log;
-                }
+        for (const std::uint32_t capability : inventory.capabilities) {
+            if (std::ranges::find(unique_capabilities, capability) == unique_capabilities.end()) {
+                unique_capabilities.push_back(capability);
             }
         }
 
@@ -369,7 +401,8 @@ int report(const Options& options) {
             const std::filesystem::path path
                 = options.dump_directory / (std::string{request.name} + ".spv");
             std::ofstream out(path, std::ios::binary);
-            out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+            out.write(
+                reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
         }
     }
 
@@ -384,35 +417,6 @@ int report(const Options& options) {
               << "  highest binding  " << worst.highest_binding << '\n'
               << "  specialised workgroup size " << (any_specialised_workgroup ? "yes" : "no") << '\n';
 
-    if (options.translate) {
-        const lsfg::translate::Limits limits = lsfg::translate::Options{}.limits;
-        std::cout << "\ntranslation to GLSL:\n"
-                  << "  modules          " << modules_translated << " of " << requests.size() << '\n'
-                  << "  total GLSL       " << glsl_bytes << " bytes\n"
-                  << "  textures         " << worst_translation.texture_count << " of "
-                  << limits.textures << '\n'
-                  << "  storage images   " << worst_translation.storage_image_count << " of "
-                  << limits.storage_images << '\n'
-                  << "  uniform buffers  " << worst_translation.uniform_buffer_count << " of "
-                  << limits.uniform_buffers << '\n'
-                  << "  storage images given a format  " << storage_images_formatted << '\n'
-                  << "  modules needing a sampler for an unsampled image  "
-                  << modules_needing_a_dummy_sampler << '\n';
-
-        if (lsfg::dksh::compiler_available()) {
-            std::cout << "\ncompilation to DKSH:\n"
-                      << "  modules          " << modules_compiled << " of " << requests.size()
-                      << '\n'
-                      << "  total DKSH       " << dksh_bytes << " bytes\n"
-                      << "  most registers   " << worst_gprs << '\n'
-                      << "  most scratch     " << worst_scratch << " bytes per warp\n"
-                      << "  most shared mem  " << worst_shared_memory << " bytes\n";
-        } else {
-            std::cout << "\nthis build has no GLSL to DKSH compiler."
-                         " Configure with -DLSFG_BUILD_UAM=ON to add it\n";
-        }
-    }
-
     std::ranges::sort(unique_capabilities);
     std::cout << "\ncapabilities declared anywhere in the chain:\n";
     for (const std::uint32_t capability : unique_capabilities) {
@@ -420,11 +424,109 @@ int report(const Options& options) {
                   << lsfg::spirv::capability_name(capability) << '\n';
     }
 
+    if (options.graph && !options.translate) {
+        lsfg::graph::Graph graph;
+        if (const lsfg::ErrorCode result = lsfg::graph::build(preparation.graph, graph);
+            !lsfg::succeeded(result)) {
+            std::cerr << "the chain does not describe: " << lsfg::error_name(result) << '\n';
+            return EXIT_FAILURE;
+        }
+        print_graph(graph, options.extent);
+    }
+
+    if (!options.translate) {
+        if (!options.dump_directory.empty()) {
+            std::cout << "\nmodules written to " << options.dump_directory.string()
+                      << ". These are extracted from a proprietary DLL and must not be published\n";
+        }
+        return EXIT_SUCCESS;
+    }
+
+    if (!lsfg::dksh::compiler_available()) {
+        std::cout << "\nthis build has no GLSL to DKSH compiler."
+                     " Configure with -DLSFG_BUILD_UAM=ON to add it\n";
+        return EXIT_SUCCESS;
+    }
+
+    std::cout << "\ntranslating and compiling:\n";
+    lsfg::prepare::Result result;
+    if (const lsfg::ErrorCode code = lsfg::prepare::run(
+            image,
+            preparation,
+            result,
+            [](const lsfg::prepare::ModuleReport& module) {
+                std::cout << "  " << std::setw(14) << std::left << module.name << std::right
+                          << std::setw(7) << module.glsl_bytes << " B GLSL " << std::setw(6)
+                          << module.dksh_bytes << " B DKSH " << std::setw(4) << module.registers
+                          << " regs " << std::setw(5) << module.scratch_bytes << " B scratch\n";
+            });
+        !lsfg::succeeded(code)) {
+        std::cerr << "preparation failed: " << lsfg::error_name(code) << '\n';
+        return EXIT_FAILURE;
+    }
+
+    std::size_t glsl_bytes = 0;
+    std::size_t dksh_bytes = 0;
+    std::uint32_t worst_gprs = 0;
+    std::uint32_t worst_scratch = 0;
+    std::uint32_t worst_shared_memory = 0;
+    std::uint32_t introduced_samplers = 0;
+    std::uint32_t storage_images_formatted = 0;
+
+    for (const lsfg::prepare::ModuleReport& module : result.reports) {
+        glsl_bytes += module.glsl_bytes;
+        dksh_bytes += module.dksh_bytes;
+        worst_gprs = std::max(worst_gprs, module.registers);
+        worst_scratch = std::max(worst_scratch, module.scratch_bytes);
+        worst_shared_memory = std::max(worst_shared_memory, module.shared_memory_bytes);
+        introduced_samplers += module.needed_introduced_sampler ? 1U : 0U;
+        storage_images_formatted += module.storage_images_formatted;
+
+        if (!options.glsl_directory.empty()) {
+            std::filesystem::create_directories(options.glsl_directory);
+            std::ofstream out(options.glsl_directory / (module.name + ".comp"));
+            out << module.glsl;
+        }
+    }
+
+    std::uint32_t worst_textures = 0;
+    std::uint32_t worst_storage = 0;
+    for (const lsfg::cache::PassInput& pass : result.contents.passes) {
+        worst_textures = std::max(worst_textures, pass.entry.texture_slot_count);
+        worst_storage = std::max(worst_storage, pass.entry.storage_image_count);
+    }
+
+    const lsfg::translate::Limits limits = preparation.translation.limits;
+    std::cout << "\ntranslation and compilation:\n"
+              << "  modules          " << result.reports.size() << " of " << requests.size() << '\n'
+              << "  total GLSL       " << glsl_bytes << " bytes\n"
+              << "  total DKSH       " << dksh_bytes << " bytes\n"
+              << "  texture slots    " << worst_textures << " of " << limits.textures << '\n'
+              << "  storage images   " << worst_storage << " of " << limits.storage_images << '\n'
+              << "  most registers   " << worst_gprs << '\n'
+              << "  most scratch     " << worst_scratch << " bytes per warp\n"
+              << "  most shared mem  " << worst_shared_memory << " bytes\n"
+              << "  storage images given a format  " << storage_images_formatted << '\n'
+              << "  modules needing a sampler for an unsampled image  " << introduced_samplers << '\n';
+
+    if (options.list_all) {
+        std::cout << "\nslot tables:\n";
+        for (std::size_t index = 0; index < result.contents.passes.size(); ++index) {
+            std::cout << "  " << result.reports[index].name << '\n';
+            print_slots(result.contents.passes[index].slots);
+        }
+    }
+
+    print_graph(result.contents.graph, options.extent);
+
+    if (!options.cache_directory.empty()) {
+        return write_cache(options, result);
+    }
+
     if (!options.dump_directory.empty()) {
         std::cout << "\nmodules written to " << options.dump_directory.string()
                   << ". These are extracted from a proprietary DLL and must not be published\n";
     }
-
     return EXIT_SUCCESS;
 }
 
@@ -440,8 +542,9 @@ int main(const int argc, const char* const* const argv) {
     const Options options = parse_arguments(arguments);
     if (!options.valid) {
         std::cerr << "lsfg-inspect " << lsfg::version::git_revision << '\n'
-                  << "usage: lsfg-inspect <Lossless.dll> [--all] [--translate]\n"
-                     "                    [--dump <directory>] [--glsl <directory>]\n";
+                  << "usage: lsfg-inspect <Lossless.dll> [--all] [--translate] [--graph]\n"
+                     "                    [--performance] [--dump <directory>]\n"
+                     "                    [--glsl <directory>] [--cache <directory>]\n";
         return EXIT_FAILURE;
     }
 

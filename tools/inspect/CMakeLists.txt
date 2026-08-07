@@ -3,9 +3,12 @@ target_link_libraries(
     lsfg_inspect
     PRIVATE
         lsfg::cache_format
+        lsfg::cache_store
         lsfg::dksh
         lsfg::hash
+        lsfg::image_graph
         lsfg::pe
+        lsfg::prepare
         lsfg::shader_set
         lsfg::spirv
         lsfg::translate
