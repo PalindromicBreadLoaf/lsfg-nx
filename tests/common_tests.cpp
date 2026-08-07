@@ -7,7 +7,6 @@
 #include <lsfg/common/ring_log.hpp>
 
 #include <array>
-#include <bit>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -105,6 +104,28 @@ void test_protocol_status_message() {
     require(status.message_view() == "short", "shorter message replaces the longer one");
 }
 
+// A header the runtime would accept, so that each check below can spoil one
+// field at a time.
+lsfg::cache::ManifestHeader plausible_header() {
+    lsfg::cache::ManifestHeader header{};
+    lsfg::cache::initialize(header);
+    header.dll_size = 4096;
+    header.shader_first_resource_id = 303;
+    header.shader_block_size = 49;
+    header.shader_precision = static_cast<std::uint32_t>(lsfg::cache::Precision::high);
+    header.pass_count = 1;
+    header.slot_count = 4;
+    header.image_count = 8;
+    header.dispatch_count = 1;
+    header.variant_count = 1;
+    header.binding_count = 4;
+    header.uniform_buffer_count = 2;
+    header.generated_frames = 1;
+    header.flow_numerator = 1;
+    header.flow_denominator = 1;
+    return header;
+}
+
 void test_cache_manifest_validation() {
     lsfg::cache::ManifestHeader header{};
     lsfg::cache::initialize(header);
@@ -112,8 +133,7 @@ void test_cache_manifest_validation() {
         lsfg::cache::validate(header) == lsfg::ErrorCode::cache_integrity_failure,
         "an empty manifest describes no shaders and is refused");
 
-    header.dll_size = 4096;
-    header.pass_count = 1;
+    header = plausible_header();
     require(lsfg::succeeded(lsfg::cache::validate(header)), "populated header is valid");
 
     header.abi_version = lsfg::cache::abi_version + 1U;
@@ -121,48 +141,42 @@ void test_cache_manifest_validation() {
         lsfg::cache::validate(header) == lsfg::ErrorCode::cache_version_mismatch,
         "foreign cache version is refused");
 
-    header.abi_version = lsfg::cache::abi_version;
+    header = plausible_header();
+    header.graph_version = lsfg::graph::graph_version + 1U;
+    require(
+        lsfg::cache::validate(header) == lsfg::ErrorCode::cache_version_mismatch,
+        "a cache describing a differently shaped chain is refused");
+
+    header = plausible_header();
     header.pass_count = lsfg::cache::max_passes + 1U;
     require(
         lsfg::cache::validate(header) == lsfg::ErrorCode::cache_integrity_failure,
         "implausible pass count is refused");
+
+    header = plausible_header();
+    header.image_count = 0;
+    require(
+        lsfg::cache::validate(header) == lsfg::ErrorCode::cache_integrity_failure,
+        "a manifest with no images cannot describe the chain");
+
+    header = plausible_header();
+    header.flow_numerator = 2;
+    require(
+        lsfg::cache::validate(header) == lsfg::ErrorCode::cache_integrity_failure,
+        "a flow extent above the output extent is refused");
 }
 
-void test_cache_payload_crc() {
-    lsfg::cache::ManifestHeader header{};
-    lsfg::cache::initialize(header);
-    header.dll_size = 4096;
-    header.pass_count = 2;
+void test_cache_configuration_round_trip() {
+    lsfg::cache::ManifestHeader header = plausible_header();
+    header.options = lsfg::cache::option_performance;
+    header.generated_frames = 2;
+    header.flow_numerator = 3;
+    header.flow_denominator = 4;
 
-    std::vector<lsfg::cache::PassEntry> passes(2);
-    for (lsfg::cache::PassEntry& entry : passes) {
-        entry.dksh_size = 512;
-        entry.workgroup_x = 8;
-        entry.workgroup_y = 8;
-        entry.workgroup_z = 1;
-        entry.width_numerator = 1;
-        entry.width_denominator = 1;
-        entry.height_numerator = 1;
-        entry.height_denominator = 1;
-    }
-
-    const std::span<const std::uint8_t> payload{
-        std::bit_cast<const std::uint8_t*>(passes.data()),
-        passes.size() * sizeof(lsfg::cache::PassEntry)};
-    header.payload_crc32 = lsfg::cache::crc32(payload);
-    require(lsfg::succeeded(lsfg::cache::validate(header, passes)), "matching CRC accepts the manifest");
-
-    passes[1].dksh_size = 513;
-    require(
-        lsfg::cache::validate(header, passes) == lsfg::ErrorCode::cache_integrity_failure,
-        "a modified pass fails the CRC");
-
-    passes.pop_back();
-    require(
-        lsfg::cache::validate(header, passes) == lsfg::ErrorCode::cache_integrity_failure,
-        "pass count must match the header");
-
-    require(lsfg::cache::crc32(std::span<const std::uint8_t>{}) == 0, "empty payload CRC");
+    const lsfg::graph::Config config = lsfg::cache::configuration(header);
+    require(config.performance && !config.hdr, "the preset survives the manifest");
+    require(config.generated_frames == 2, "the generated frame count survives the manifest");
+    require(config.flow_numerator == 3 && config.flow_denominator == 4, "the flow scale survives");
 }
 
 void test_cache_pass_interface() {
@@ -171,19 +185,43 @@ void test_cache_pass_interface() {
     entry.workgroup_x = 8;
     entry.workgroup_y = 8;
     entry.workgroup_z = 0;
-    entry.width_numerator = 1;
-    entry.width_denominator = 1;
-    entry.height_numerator = 1;
-    entry.height_denominator = 1;
+    entry.image_count = 2;
+    entry.texture_slot_count = 3;
+    entry.storage_image_count = 1;
+    entry.sampler_count = 1;
+    entry.uniform_buffer_count = 1;
+    entry.slot_count = 5;
     require(
         lsfg::cache::validate(entry) == lsfg::ErrorCode::shader_interface_mismatch,
         "a zero workgroup dimension cannot dispatch");
 
     entry.workgroup_z = 1;
-    entry.height_denominator = 0;
+    require(lsfg::succeeded(lsfg::cache::validate(entry)), "a described pass is valid");
+
+    entry.slot_count = 4;
     require(
         lsfg::cache::validate(entry) == lsfg::ErrorCode::shader_interface_mismatch,
-        "a zero denominator has no representable extent");
+        "a slot table that does not cover every resource is refused");
+
+    entry.slot_count = 5;
+    entry.texture_slot_count = 1;
+    require(
+        lsfg::cache::validate(entry) == lsfg::ErrorCode::shader_interface_mismatch,
+        "fewer texture slots than images means an image is unreachable");
+
+    entry.texture_slot_count = 3;
+    entry.dksh_size = 0;
+    require(
+        lsfg::cache::validate(entry) == lsfg::ErrorCode::cache_integrity_failure,
+        "a pass with no compiled module is refused");
+}
+
+void test_crc() {
+    require(lsfg::cache::crc32(std::span<const std::uint8_t>{}) == 0, "empty payload CRC");
+
+    const std::array<std::uint8_t, 4> data{1, 2, 3, 4};
+    const std::array<std::uint8_t, 4> altered{1, 2, 3, 5};
+    require(lsfg::cache::crc32(data) != lsfg::cache::crc32(altered), "a changed byte changes the CRC");
 }
 
 } // namespace
@@ -195,8 +233,9 @@ int main() {
     test_protocol_defaults();
     test_protocol_status_message();
     test_cache_manifest_validation();
-    test_cache_payload_crc();
+    test_cache_configuration_round_trip();
     test_cache_pass_interface();
+    test_crc();
     std::cout << "All common checks passed\n";
     return EXIT_SUCCESS;
 }

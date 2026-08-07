@@ -4,6 +4,7 @@
 #pragma once
 
 #include <lsfg/common/error.hpp>
+#include <lsfg/common/image_graph.hpp>
 #include <lsfg/common/sha256.hpp>
 
 #include <array>
@@ -18,7 +19,7 @@ inline constexpr std::uint32_t manifest_magic = 0x4746'534CU; // "LSFG"
 
 // Bump on any change to the manifest layout or to what the runtime expects a
 // cached module to contain.
-inline constexpr std::uint32_t abi_version = 1;
+inline constexpr std::uint32_t abi_version = 2;
 
 // Bump whenever extraction could select different shaders or hand different
 // bytes to the translator for the same DLL.
@@ -27,9 +28,23 @@ inline constexpr std::uint32_t extractor_version = 1;
 inline constexpr std::size_t digest_size = 32;
 inline constexpr std::size_t revision_size = 20;
 inline constexpr std::uint32_t max_passes = 64;
+inline constexpr std::uint32_t max_slots = 4096;
+inline constexpr std::uint32_t max_images = 4096;
+inline constexpr std::uint32_t max_dispatches = 1024;
+inline constexpr std::uint32_t max_variants = 2048;
+inline constexpr std::uint32_t max_bindings = 65536;
 
 using Digest = std::array<std::uint8_t, digest_size>;
 using Revision = std::array<std::uint8_t, revision_size>;
+
+enum class Precision : std::uint32_t {
+    low = 0,
+    high = 1,
+};
+
+// Bit positions in ManifestHeader::options.
+inline constexpr std::uint32_t option_performance = 1U << 0U;
+inline constexpr std::uint32_t option_hdr = 1U << 1U;
 
 struct alignas(8) ManifestHeader {
     std::uint32_t magic{};
@@ -38,22 +53,43 @@ struct alignas(8) ManifestHeader {
     Digest dll_hash{};
     std::uint64_t dll_size{};
 
-    std::uint32_t shader_set{};
     std::uint32_t extractor_version{};
+    std::uint32_t graph_version{};
 
     Revision spirv_cross_revision{};
     Revision uam_revision{};
 
     std::uint32_t translation_options{};
     std::uint32_t backend_abi_version{};
+
+    std::uint32_t shader_first_resource_id{};
+    std::uint32_t shader_block_size{};
+    std::uint32_t shader_precision{};
+    std::uint32_t options{};
+
     std::uint32_t pass_count{};
-    // Covers every pass entry that follows.
+    std::uint32_t slot_count{};
+    std::uint32_t image_count{};
+    std::uint32_t dispatch_count{};
+    std::uint32_t variant_count{};
+    std::uint32_t binding_count{};
+
+    std::uint32_t uniform_buffer_count{};
+    std::uint32_t generated_frames{};
+    std::uint32_t flow_numerator{};
+    std::uint32_t flow_denominator{};
+
+    // Covers every section that follows the header.
     std::uint32_t payload_crc32{};
+    std::uint32_t reserved0_{};
 };
 
 struct alignas(8) PassEntry {
     std::uint32_t resource_id{};
+    std::uint32_t block_index{};
     std::uint32_t dksh_size{};
+    std::uint32_t scratch_memory_bytes{};
+
     Digest dksh_hash{};
 
     std::uint16_t workgroup_x{};
@@ -61,24 +97,43 @@ struct alignas(8) PassEntry {
     std::uint16_t workgroup_z{};
     std::uint16_t reserved0_{};
 
-    std::uint32_t sampled_texture_mask{};
-    std::uint32_t storage_image_mask{};
-    std::uint32_t uniform_buffer_mask{};
-    std::uint32_t storage_buffer_mask{};
+    // What the module declares and what the graph therefore binds.
+    std::uint32_t image_count{};
+    std::uint32_t storage_image_count{};
+    std::uint32_t sampler_count{};
+    std::uint32_t uniform_buffer_count{};
 
-    // Image extent as a fraction of the output extent, so a manifest stays
-    // valid across resolutions instead of pinning one.
-    std::uint16_t width_numerator{};
-    std::uint16_t width_denominator{};
-    std::uint16_t height_numerator{};
-    std::uint16_t height_denominator{};
+    // Texture slots after translation.
+    std::uint32_t texture_slot_count{};
 
-    std::uint32_t image_format{};
-    std::uint32_t scratch_memory_bytes{};
+    std::uint32_t slot_first{};
+    std::uint32_t slot_count{};
+
+    std::uint32_t register_count{};
+    std::uint32_t shared_memory_bytes{};
 };
 
-static_assert(sizeof(ManifestHeader) == 112);
-static_assert(sizeof(PassEntry) == 80);
+enum class SlotKind : std::uint8_t {
+    uniform_buffer = 0,
+    texture = 1,
+    storage_image = 2,
+};
+
+// Translation gives an image its own sampler when the module samples nothing
+// from it, so a module can reach one image through two texture slots.
+inline constexpr std::uint8_t introduced_sampler = 0xFFU;
+
+struct alignas(4) SlotEntry {
+    std::uint8_t kind{};
+    std::uint8_t slot{};
+    // Position of the resource among the ones the module declares of its kind.
+    std::uint8_t ordinal{};
+    std::uint8_t sampler_ordinal{};
+};
+
+static_assert(sizeof(ManifestHeader) == 168);
+static_assert(sizeof(PassEntry) == 96);
+static_assert(sizeof(SlotEntry) == 4);
 static_assert(alignof(ManifestHeader) == 8);
 static_assert(alignof(PassEntry) == 8);
 
@@ -88,8 +143,13 @@ struct CacheKeyInputs {
     std::string_view spirv_cross_revision;
     std::string_view uam_revision;
     std::uint32_t translation_options{};
+    std::uint32_t graph_options{};
     std::uint32_t backend_abi_version{};
 };
+
+// Everything about a requested chain that changes what gets compiled, in one
+// word.
+[[nodiscard]] std::uint32_t pack_options(Precision precision, const graph::Config& config) noexcept;
 
 // Names the directory a prepared cache is written to.
 [[nodiscard]] Digest cache_key(const CacheKeyInputs& inputs) noexcept;
@@ -101,7 +161,17 @@ void initialize(ManifestHeader& header) noexcept;
 [[nodiscard]] ErrorCode validate(const ManifestHeader& header) noexcept;
 [[nodiscard]] ErrorCode validate(const PassEntry& entry) noexcept;
 
-// Checks the header, every entry, and the payload CRC together.
-[[nodiscard]] ErrorCode validate(const ManifestHeader& header, std::span<const PassEntry> passes) noexcept;
+// Checks the header, every pass, the slot tables, and that the header agrees
+// with the graph it claims to describe.
+[[nodiscard]] ErrorCode validate(
+    const ManifestHeader& header,
+    std::span<const PassEntry> passes,
+    std::span<const SlotEntry> slots,
+    const graph::Graph& graph) noexcept;
+
+// Fills in everything about the header that follows from the graph.
+void describe(ManifestHeader& header, const graph::Graph& graph) noexcept;
+
+[[nodiscard]] graph::Config configuration(const ManifestHeader& header) noexcept;
 
 } // namespace lsfg::cache

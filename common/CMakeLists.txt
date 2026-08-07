@@ -64,7 +64,15 @@ target_link_libraries(lsfg_protocol PUBLIC lsfg::error lsfg_project_options)
 add_library(lsfg_cache_format STATIC cache-format/src/cache_format.cpp)
 add_library(lsfg::cache_format ALIAS lsfg_cache_format)
 target_include_directories(lsfg_cache_format PUBLIC cache-format/include)
-target_link_libraries(lsfg_cache_format PUBLIC lsfg::error lsfg::hash lsfg_project_options)
+target_link_libraries(
+    lsfg_cache_format
+    PUBLIC lsfg::error lsfg::hash lsfg::image_graph lsfg_project_options
+)
+
+add_library(lsfg_cache_store STATIC cache-store/src/cache_store.cpp)
+add_library(lsfg::cache_store ALIAS lsfg_cache_store)
+target_include_directories(lsfg_cache_store PUBLIC cache-store/include)
+target_link_libraries(lsfg_cache_store PUBLIC lsfg::cache_format lsfg_project_options)
 
 configure_file(
     version/version.hpp.in
