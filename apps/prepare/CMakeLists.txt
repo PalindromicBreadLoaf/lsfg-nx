@@ -2,14 +2,11 @@ add_executable(lsfg_prepare source/main.cpp)
 target_link_libraries(
     lsfg_prepare
     PRIVATE
-        lsfg::cache_format
-        lsfg::dksh
+        lsfg::cache_store
         lsfg::hash
+        lsfg::image_graph
         lsfg::logging
-        lsfg::pe
-        lsfg::shader_set
-        lsfg::spirv
-        lsfg::translate
+        lsfg::prepare
         lsfg::version
         lsfg_project_options
 )
