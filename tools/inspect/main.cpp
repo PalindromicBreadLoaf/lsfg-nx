@@ -5,6 +5,7 @@
 // the preparation app would find in it, and on request produces the same cache.
 
 #include <lsfg/backend/cache_load.hpp>
+#include <lsfg/backend/layout.hpp>
 
 #include <lsfg/common/cache_format.hpp>
 #include <lsfg/common/cache_store.hpp>
@@ -248,6 +249,13 @@ int report_acceptance(const lsfg::cache::Loaded& loaded, const Options& options)
         return EXIT_FAILURE;
     }
 
+    lsfg::backend::DescriptorLayout layout;
+    if (const lsfg::ErrorCode code = lsfg::backend::describe(loaded.graph, layout);
+        !lsfg::succeeded(code)) {
+        std::cerr << "\nthe chain's bindings do not describe: " << lsfg::error_name(code) << '\n';
+        return EXIT_FAILURE;
+    }
+
     std::uint32_t widest_groups = 0;
     for (const lsfg::backend::DispatchPlan& dispatch : plan.dispatches) {
         widest_groups = std::max(widest_groups, dispatch.groups_x * dispatch.groups_y);
@@ -264,6 +272,9 @@ int report_acceptance(const lsfg::cache::Loaded& loaded, const Options& options)
               << " shared and " << plan.generated_frame_dispatches << " per generated frame\n"
               << "  descriptor sets  " << plan.descriptor_sets << '\n'
               << "  uniform buffers  " << plan.uniform_buffers << '\n'
+              << "  descriptors      " << layout.image_descriptors << " images, "
+              << layout.sampled_images << " sampled and " << layout.storage_images << " written, "
+              << lsfg::backend::sampler_descriptor_count << " samplers\n"
               << "  most registers   " << plan.max_registers << '\n'
               << "  most scratch     " << plan.max_scratch_bytes_per_warp << " B per warp\n"
               << "  most shared mem  " << plan.max_shared_memory_bytes << " B\n"

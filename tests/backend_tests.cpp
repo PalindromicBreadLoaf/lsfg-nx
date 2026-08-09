@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <lsfg/backend/cache_load.hpp>
+#include <lsfg/backend/layout.hpp>
 
 #include <lsfg/common/cache_store.hpp>
 #include <lsfg/common/dksh.hpp>
@@ -386,6 +387,101 @@ void test_a_missing_cache_leaves_the_runtime_alone() {
     require(!why.reason.empty(), "a refusal says why without allocating");
 }
 
+void test_every_image_carries_the_descriptors_it_is_reached_through() {
+    lsfg::graph::Graph graph;
+    require(lsfg::succeeded(lsfg::graph::build(lsfg::graph::Config{}, graph)), "the graph builds");
+
+    lsfg::backend::DescriptorLayout layout;
+    require(lsfg::succeeded(lsfg::backend::describe(graph, layout)), "the chain is described");
+
+    require(layout.images.size() == graph.images.size(), "every image is described");
+    require(
+        layout.image_descriptors == layout.sampled_images + layout.storage_images,
+        "a descriptor is either a sampled one or a storage one");
+
+    std::vector<bool> seen(layout.image_descriptors, false);
+    for (std::size_t index = 0; index < layout.images.size(); ++index) {
+        const lsfg::backend::ImageDescriptors& entry = layout.images[index];
+        require(
+            entry.sampled != lsfg::backend::no_descriptor
+                || entry.storage != lsfg::backend::no_descriptor,
+            "no image is allocated that nothing reaches");
+
+        for (const std::uint32_t descriptor : {entry.sampled, entry.storage}) {
+            if (descriptor == lsfg::backend::no_descriptor) {
+                continue;
+            }
+            require(descriptor < seen.size(), "a descriptor is inside the table");
+            require(!seen[descriptor], "no two images share a descriptor");
+            seen[descriptor] = true;
+        }
+
+        // A real frame is only ever read and a generated one only ever written,
+        // so neither needs the descriptor the other would.
+        const auto role = static_cast<lsfg::graph::ImageRole>(graph.images[index].role);
+        if (role == lsfg::graph::ImageRole::history) {
+            require(
+                entry.storage == lsfg::backend::no_descriptor,
+                "a real frame is never given a storage descriptor");
+        }
+        if (role == lsfg::graph::ImageRole::generated) {
+            require(
+                entry.sampled == lsfg::backend::no_descriptor,
+                "a generated frame is never given a sampled descriptor");
+        }
+    }
+
+    for (const bool used : seen) {
+        require(used, "the descriptor table has no holes in it");
+    }
+}
+
+void test_a_binding_outside_the_graph_is_refused() {
+    lsfg::graph::Graph graph;
+    require(lsfg::succeeded(lsfg::graph::build(lsfg::graph::Config{}, graph)), "the graph builds");
+
+    lsfg::backend::DescriptorLayout layout;
+
+    lsfg::graph::Graph broken = graph;
+    broken.bindings.back() = static_cast<std::uint32_t>(broken.images.size());
+    require(
+        lsfg::backend::describe(broken, layout) == lsfg::ErrorCode::cache_integrity_failure,
+        "a binding naming an image the graph does not have is refused");
+
+    broken = graph;
+    broken.bindings.pop_back();
+    require(
+        lsfg::backend::describe(broken, layout) == lsfg::ErrorCode::cache_integrity_failure,
+        "a variant reaching past the bindings is refused");
+}
+
+void test_allocations_are_placed_and_overflow_is_caught() {
+    lsfg::backend::Arena arena;
+
+    require(arena.place(100, 256) == 0, "the first allocation starts at the beginning");
+    require(arena.place(100, 256) == 256, "the next one is aligned past it");
+    require(arena.place(1, 1) == 356, "an unaligned allocation follows immediately");
+    require(arena.used() == 357, "the arena is as long as what it holds");
+    require(!arena.overflowed(), "nothing has overflowed");
+    require(
+        arena.block_size() == lsfg::backend::memory_block_alignment,
+        "a memory block is a whole number of pages");
+
+    lsfg::backend::Arena empty;
+    require(empty.block_size() == 0, "an arena holding nothing needs no block");
+
+    lsfg::backend::Arena odd;
+    static_cast<void>(odd.place(16, 3));
+    require(odd.overflowed(), "an alignment that is not a power of two is not honoured quietly");
+
+    lsfg::backend::Arena full;
+    static_cast<void>(full.place(lsfg::backend::max_memory_block_bytes, 1));
+    require(!full.overflowed(), "the largest block a 32-bit offset reaches is allowed");
+    static_cast<void>(full.place(1, 1));
+    require(full.overflowed(), "one byte past it is not");
+    require(full.block_size() == 0, "an arena that overflowed sizes no block");
+}
+
 } // namespace
 
 int main() {
@@ -395,6 +491,9 @@ int main() {
     test_a_module_the_executor_cannot_bind_is_refused();
     test_the_chain_is_refused_before_it_allocates();
     test_a_missing_cache_leaves_the_runtime_alone();
+    test_every_image_carries_the_descriptors_it_is_reached_through();
+    test_a_binding_outside_the_graph_is_refused();
+    test_allocations_are_placed_and_overflow_is_caught();
 
     std::cout << "backend cache tests passed\n";
     return EXIT_SUCCESS;

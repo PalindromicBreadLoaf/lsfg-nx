@@ -1,4 +1,10 @@
-add_library(lsfg_backend STATIC src/cache_load.cpp)
+set(_backend_sources src/cache_load.cpp src/layout.cpp)
+
+if(NINTENDO_SWITCH)
+    list(APPEND _backend_sources src/device.cpp)
+endif()
+
+add_library(lsfg_backend STATIC ${_backend_sources})
 add_library(lsfg::backend ALIAS lsfg_backend)
 target_include_directories(lsfg_backend PUBLIC include)
 target_link_libraries(
