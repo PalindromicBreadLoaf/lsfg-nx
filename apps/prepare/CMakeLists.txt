@@ -2,6 +2,7 @@ add_executable(lsfg_prepare source/main.cpp)
 target_link_libraries(
     lsfg_prepare
     PRIVATE
+        lsfg::backend
         lsfg::cache_store
         lsfg::hash
         lsfg::image_graph

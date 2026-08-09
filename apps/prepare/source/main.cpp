@@ -1,6 +1,8 @@
 // Copyright 2026 PalindromicBreadLoaf (palindromicbreadloaf@tuta.com)
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <lsfg/backend/cache_load.hpp>
+
 #include <lsfg/common/cache_store.hpp>
 #include <lsfg/common/image_graph.hpp>
 #include <lsfg/common/prepare.hpp>
@@ -64,6 +66,45 @@ std::vector<std::uint8_t> read_dll() {
         return {};
     }
     return bytes;
+}
+
+// A cache is only finished when the code that has to run it says so, and this
+// is the machine whose limits decide that.
+void report_acceptance(const lsfg::cache::Loaded& cache, const lsfg::graph::Config& config) {
+    const lsfg::backend::Request request{
+        .config = config,
+        .precision = lsfg::cache::Precision::high,
+        .output = handheld_extent,
+    };
+
+    lsfg::backend::Plan plan;
+    lsfg::backend::Rejection why;
+    if (!lsfg::backend::accept(cache, request, plan, why)) {
+        std::printf(
+            "\nthe runtime would refuse this cache:\n%.*s\n",
+            static_cast<int>(why.reason.size()),
+            why.reason.data());
+        message_log.push(armGetSystemTick(), lsfg::LogLevel::error, why.code, "cache refused");
+        return;
+    }
+
+    std::uint32_t largest_dispatch = 0;
+    for (const lsfg::backend::DispatchPlan& dispatch : plan.dispatches) {
+        const std::uint32_t groups = dispatch.groups_x * dispatch.groups_y;
+        largest_dispatch = groups > largest_dispatch ? groups : largest_dispatch;
+    }
+
+    std::printf(
+        "\nthe runtime accepts it: %u images, %llu KiB at %ux%u\n",
+        plan.owned_images,
+        static_cast<unsigned long long>(plan.owned_image_bytes / 1024U),
+        plan.output.width,
+        plan.output.height);
+    std::printf(
+        "%u workgroups at most, %u registers, %u B scratch per warp\n",
+        largest_dispatch,
+        plan.max_registers,
+        plan.max_scratch_bytes_per_warp);
 }
 
 bool prepare_dll() {
@@ -204,6 +245,8 @@ bool prepare_dll() {
 
     std::printf("\ncache written and verified:\n%s\n", directory.c_str());
     message_log.push(armGetSystemTick(), lsfg::LogLevel::info, lsfg::ErrorCode::ok, "cache written");
+
+    report_acceptance(written, options.graph);
     return true;
 }
 
