@@ -51,6 +51,7 @@ void initialize(ManifestHeader& header) noexcept {
     header.abi_version = abi_version;
     header.extractor_version = extractor_version;
     header.graph_version = graph::graph_version;
+    header.backend_abi_version = backend_abi_version;
 }
 
 void describe(ManifestHeader& header, const graph::Graph& graph) noexcept {

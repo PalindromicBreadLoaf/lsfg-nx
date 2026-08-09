@@ -21,6 +21,9 @@ inline constexpr std::uint32_t manifest_magic = 0x4746'534CU; // "LSFG"
 // cached module to contain.
 inline constexpr std::uint32_t abi_version = 2;
 
+// Bump when the runtime would bind a cached module differently.
+inline constexpr std::uint32_t backend_abi_version = 2;
+
 // Bump whenever extraction could select different shaders or hand different
 // bytes to the translator for the same DLL.
 inline constexpr std::uint32_t extractor_version = 1;

@@ -127,7 +127,7 @@ ErrorCode run(
             options.precision == shaders::Precision::high ? cache::Precision::high
                                                           : cache::Precision::low,
             options.graph),
-        .backend_abi_version = cache::abi_version,
+        .backend_abi_version = cache::backend_abi_version,
     });
 
     pe::ResourceTable table;
@@ -155,7 +155,6 @@ ErrorCode run(
     out.contents.header.dll_hash = out.dll_hash;
     out.contents.header.dll_size = image.size();
     out.contents.header.translation_options = options.translation.glsl_version;
-    out.contents.header.backend_abi_version = cache::abi_version;
     out.contents.header.shader_first_resource_id = out.set.first_resource_id;
     out.contents.header.shader_block_size = out.set.block_size;
     out.contents.header.shader_precision = static_cast<std::uint32_t>(
