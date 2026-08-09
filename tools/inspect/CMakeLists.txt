@@ -2,6 +2,7 @@ add_executable(lsfg_inspect main.cpp)
 target_link_libraries(
     lsfg_inspect
     PRIVATE
+        lsfg::backend
         lsfg::cache_format
         lsfg::cache_store
         lsfg::dksh

@@ -4,6 +4,8 @@
 // Host-side counterpart of the preparation app. It reads a DLL and reports what
 // the preparation app would find in it, and on request produces the same cache.
 
+#include <lsfg/backend/cache_load.hpp>
+
 #include <lsfg/common/cache_format.hpp>
 #include <lsfg/common/cache_store.hpp>
 #include <lsfg/common/dksh.hpp>
@@ -36,6 +38,7 @@ struct Options {
     std::filesystem::path dump_directory;
     std::filesystem::path glsl_directory;
     std::filesystem::path cache_directory;
+    std::filesystem::path load_directory;
     lsfg::graph::Extent extent{.width = 1280, .height = 720};
     bool list_all{};
     bool translate{};
@@ -64,6 +67,21 @@ Options parse_arguments(const std::span<const std::string_view> arguments) {
         } else if (argument == "--cache" && index + 1U < arguments.size()) {
             options.cache_directory = arguments[++index];
             options.translate = true;
+        } else if (argument == "--load" && index + 1U < arguments.size()) {
+            options.load_directory = arguments[++index];
+        } else if (argument == "--extent" && index + 1U < arguments.size()) {
+            const std::string_view extent = arguments[++index];
+            const std::size_t separator = extent.find('x');
+            if (separator == std::string_view::npos) {
+                return options;
+            }
+            options.extent.width = static_cast<std::uint32_t>(
+                std::strtoul(std::string{extent.substr(0, separator)}.c_str(), nullptr, 10));
+            options.extent.height = static_cast<std::uint32_t>(
+                std::strtoul(std::string{extent.substr(separator + 1U)}.c_str(), nullptr, 10));
+            if (options.extent.width == 0 || options.extent.height == 0) {
+                return options;
+            }
         } else if (argument.starts_with("--")) {
             return options;
         } else if (options.dll.empty()) {
@@ -73,7 +91,7 @@ Options parse_arguments(const std::span<const std::string_view> arguments) {
         }
     }
 
-    options.valid = !options.dll.empty();
+    options.valid = !options.dll.empty() || !options.load_directory.empty();
     return options;
 }
 
@@ -209,6 +227,75 @@ void print_graph(const lsfg::graph::Graph& graph, const lsfg::graph::Extent exte
     }
 }
 
+// What the injected runtime would decide about a cache, and what it would
+// allocate if it took it.
+int report_acceptance(const lsfg::cache::Loaded& loaded, const Options& options) {
+    lsfg::backend::Request request;
+    request.config.performance = options.performance;
+    request.output = options.extent;
+
+    lsfg::backend::Plan plan;
+    lsfg::backend::Rejection why;
+    if (!lsfg::backend::accept(loaded, request, plan, why)) {
+        std::cerr << "\nthe runtime would refuse this cache: " << lsfg::error_name(why.code) << '\n'
+                  << "  " << why.reason << '\n';
+        if (why.pass != lsfg::backend::no_pass) {
+            std::cerr << "  module " << why.pass << '\n';
+        }
+        if (why.allowed != 0) {
+            std::cerr << "  " << why.observed << " against " << why.allowed << " allowed\n";
+        }
+        return EXIT_FAILURE;
+    }
+
+    std::uint32_t widest_groups = 0;
+    for (const lsfg::backend::DispatchPlan& dispatch : plan.dispatches) {
+        widest_groups = std::max(widest_groups, dispatch.groups_x * dispatch.groups_y);
+    }
+
+    std::cout << "\nthe runtime accepts this cache at " << plan.output.width << 'x'
+              << plan.output.height << ":\n"
+              << "  modules          " << loaded.passes.size() << '\n'
+              << "  images           " << plan.images.size() << ", " << plan.owned_images
+              << " allocated here and " << plan.imported_images << " from presentation\n"
+              << "  owned memory     " << (plan.owned_image_bytes / 1024U) << " KiB of "
+              << (request.memory_budget_bytes / 1024U) << " KiB allowed\n"
+              << "  dispatches       " << plan.dispatches.size() << ", " << plan.prepass_dispatches
+              << " shared and " << plan.generated_frame_dispatches << " per generated frame\n"
+              << "  descriptor sets  " << plan.descriptor_sets << '\n'
+              << "  uniform buffers  " << plan.uniform_buffers << '\n'
+              << "  most registers   " << plan.max_registers << '\n'
+              << "  most scratch     " << plan.max_scratch_bytes_per_warp << " B per warp\n"
+              << "  most shared mem  " << plan.max_shared_memory_bytes << " B\n"
+              << "  largest dispatch " << widest_groups << " workgroups\n";
+    return EXIT_SUCCESS;
+}
+
+int load_cache(const Options& options) {
+    lsfg::cache::Loaded loaded;
+    if (const lsfg::ErrorCode code
+        = lsfg::cache::read(options.load_directory.string(), loaded);
+        !lsfg::succeeded(code)) {
+        std::cerr << "not a cache this build can read: " << lsfg::error_name(code) << '\n';
+        return EXIT_FAILURE;
+    }
+
+    std::cout << "cache     " << options.load_directory.string() << '\n'
+              << "dll       " << lsfg::to_hex(loaded.header.dll_hash).data() << '\n'
+              << "size      " << loaded.header.dll_size << " bytes\n"
+              << "modules   " << loaded.passes.size() << '\n'
+              << "preset    " << (loaded.graph.config.performance ? "performance" : "quality")
+              << ", " << (loaded.graph.config.hdr ? "HDR" : "SDR") << ", "
+              << (loaded.header.shader_precision
+                          == static_cast<std::uint32_t>(lsfg::cache::Precision::high)
+                      ? "high"
+                      : "low")
+              << " precision, " << loaded.graph.config.generated_frames << " generated frame(s)\n";
+
+    print_graph(loaded.graph, options.extent);
+    return report_acceptance(loaded, options);
+}
+
 int write_cache(const Options& options, const lsfg::prepare::Result& result) {
     const std::string directory
         = lsfg::prepare::directory_for(options.cache_directory.string(), result);
@@ -248,7 +335,7 @@ int write_cache(const Options& options, const lsfg::prepare::Result& result) {
               << "  " << loaded.passes.size() << " modules and a manifest, read back and verified\n"
               << "  it holds compiled shaders derived from a proprietary DLL"
                  " and must not be published\n";
-    return EXIT_SUCCESS;
+    return report_acceptance(loaded, options);
 }
 
 int report(const Options& options) {
@@ -275,7 +362,7 @@ int report(const Options& options) {
         .translation_options = preparation.translation.glsl_version,
         .graph_options
         = lsfg::cache::pack_options(lsfg::cache::Precision::high, preparation.graph),
-        .backend_abi_version = lsfg::cache::abi_version,
+        .backend_abi_version = lsfg::cache::backend_abi_version,
     });
     std::cout << "cache key " << lsfg::to_hex(key).data() << "\n\n";
 
@@ -543,9 +630,16 @@ int main(const int argc, const char* const* const argv) {
     if (!options.valid) {
         std::cerr << "lsfg-inspect " << lsfg::version::git_revision << '\n'
                   << "usage: lsfg-inspect <Lossless.dll> [--all] [--translate] [--graph]\n"
-                     "                    [--performance] [--dump <directory>]\n"
-                     "                    [--glsl <directory>] [--cache <directory>]\n";
+                     "                    [--performance] [--extent <width>x<height>]\n"
+                     "                    [--dump <directory>] [--glsl <directory>]\n"
+                     "                    [--cache <directory>]\n"
+                     "       lsfg-inspect --load <cache directory> [--performance]\n"
+                     "                    [--extent <width>x<height>]\n";
         return EXIT_FAILURE;
+    }
+
+    if (!options.load_directory.empty()) {
+        return load_cache(options);
     }
 
     return report(options);
