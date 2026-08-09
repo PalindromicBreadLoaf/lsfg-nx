@@ -17,3 +17,7 @@ target_link_libraries(
         lsfg::dksh
         lsfg::shader_set
 )
+
+if(NINTENDO_SWITCH)
+    target_link_libraries(lsfg_backend PUBLIC $<IF:$<CONFIG:Debug>,deko3dd,deko3d>)
+endif()
