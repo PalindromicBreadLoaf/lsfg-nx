@@ -1,5 +1,13 @@
 add_executable(lsfg_test_pattern source/main.cpp)
-target_link_libraries(lsfg_test_pattern PRIVATE lsfg::logging lsfg_project_options)
+target_link_libraries(
+    lsfg_test_pattern
+    PRIVATE
+        lsfg::backend
+        lsfg::cache_store
+        lsfg::image_graph
+        lsfg::logging
+        lsfg_project_options
+)
 
 nx_create_nro(
     lsfg_test_pattern_nro
