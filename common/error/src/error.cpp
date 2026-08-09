@@ -17,6 +17,7 @@ std::string_view error_name(const ErrorCode code) noexcept {
     case ErrorCode::cache_missing: return "cache_missing";
     case ErrorCode::cache_version_mismatch: return "cache_version_mismatch";
     case ErrorCode::cache_integrity_failure: return "cache_integrity_failure";
+    case ErrorCode::cache_configuration_mismatch: return "cache_configuration_mismatch";
     case ErrorCode::shader_set_unknown: return "shader_set_unknown";
     case ErrorCode::shader_interface_mismatch: return "shader_interface_mismatch";
     case ErrorCode::shader_compile_failed: return "shader_compile_failed";

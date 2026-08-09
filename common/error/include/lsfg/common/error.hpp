@@ -23,6 +23,7 @@ enum class ErrorCode : std::uint32_t {
     cache_missing = 0x0001'0001,
     cache_version_mismatch = 0x0001'0002,
     cache_integrity_failure = 0x0001'0003,
+    cache_configuration_mismatch = 0x0001'0004,
 
     shader_set_unknown = 0x0002'0001,
     shader_interface_mismatch = 0x0002'0002,

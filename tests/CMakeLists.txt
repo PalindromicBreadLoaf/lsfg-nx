@@ -43,6 +43,18 @@ target_link_libraries(
 )
 add_test(NAME lsfg_cache_tests COMMAND lsfg_cache_tests)
 
+add_executable(lsfg_backend_tests backend_tests.cpp)
+target_link_libraries(
+    lsfg_backend_tests
+    PRIVATE
+        lsfg::backend
+        lsfg::dksh
+        lsfg::image_graph
+        lsfg::shader_set
+        lsfg_project_options
+)
+add_test(NAME lsfg_backend_tests COMMAND lsfg_backend_tests)
+
 add_executable(lsfg_translation_tests translation_tests.cpp)
 target_link_libraries(
     lsfg_translation_tests

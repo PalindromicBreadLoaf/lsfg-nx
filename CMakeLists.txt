@@ -44,6 +44,7 @@ if(LSFG_BUILD_UAM)
 endif()
 
 add_subdirectory(common)
+add_subdirectory(runtime/backend)
 
 if(LSFG_BUILD_SWITCH_APPS)
     enable_language(ASM)
