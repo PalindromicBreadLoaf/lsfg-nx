@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <lsfg/backend/layout.hpp>
 #include <lsfg/common/cache_format.hpp>
 #include <lsfg/common/cache_store.hpp>
 #include <lsfg/common/error.hpp>
@@ -18,9 +19,9 @@ namespace lsfg::backend {
 
 // What the executor can bind to one dispatch.
 struct Limits {
-    std::uint32_t textures{32};
-    std::uint32_t storage_images{8};
-    std::uint32_t uniform_buffers{16};
+    std::uint32_t textures{max_texture_slots};
+    std::uint32_t storage_images{max_storage_slots};
+    std::uint32_t uniform_buffers{max_uniform_slots};
     std::uint32_t workgroup_invocations{1024};
     std::uint32_t shared_memory_bytes{48U * 1024U};
 };

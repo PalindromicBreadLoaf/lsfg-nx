@@ -4,6 +4,7 @@
 // Host-side counterpart of the preparation app. It reads a DLL and reports what
 // the preparation app would find in it, and on request produces the same cache.
 
+#include <lsfg/backend/binding.hpp>
 #include <lsfg/backend/cache_load.hpp>
 #include <lsfg/backend/layout.hpp>
 
@@ -261,6 +262,30 @@ int report_acceptance(const lsfg::cache::Loaded& loaded, const Options& options)
         widest_groups = std::max(widest_groups, dispatch.groups_x * dispatch.groups_y);
     }
 
+    // Every descriptor set is bound here rather than counted.
+    std::uint32_t bound_textures = 0;
+    std::uint32_t bound_storage_images = 0;
+    std::uint32_t widest_textures = 0;
+    std::uint32_t widest_storage_images = 0;
+    for (std::uint32_t index = 0; index < plan.dispatches.size(); ++index) {
+        const lsfg::graph::DispatchEntry& entry = loaded.graph.dispatches[index];
+        for (std::uint32_t phase = 0; phase < entry.variant_count; ++phase) {
+            lsfg::backend::DispatchBinding binding;
+            if (const lsfg::ErrorCode code
+                = lsfg::backend::bind(loaded, plan, layout, index, phase, binding);
+                !lsfg::succeeded(code)) {
+                std::cerr << "\ndispatch " << index << " of " << plan.dispatches.size()
+                          << " does not bind: " << lsfg::error_name(code) << '\n';
+                return EXIT_FAILURE;
+            }
+
+            bound_textures += binding.texture_count;
+            bound_storage_images += binding.storage_count;
+            widest_textures = std::max(widest_textures, binding.texture_count);
+            widest_storage_images = std::max(widest_storage_images, binding.storage_count);
+        }
+    }
+
     std::cout << "\nthe runtime accepts this cache at " << plan.output.width << 'x'
               << plan.output.height << ":\n"
               << "  modules          " << loaded.passes.size() << '\n'
@@ -275,6 +300,9 @@ int report_acceptance(const lsfg::cache::Loaded& loaded, const Options& options)
               << "  descriptors      " << layout.image_descriptors << " images, "
               << layout.sampled_images << " sampled and " << layout.storage_images << " written, "
               << lsfg::backend::sampler_descriptor_count << " samplers\n"
+              << "  bindings         " << bound_textures << " texture slots and "
+              << bound_storage_images << " storage images filled, at most " << widest_textures
+              << " and " << widest_storage_images << " in one dispatch\n"
               << "  most registers   " << plan.max_registers << '\n'
               << "  most scratch     " << plan.max_scratch_bytes_per_warp << " B per warp\n"
               << "  most shared mem  " << plan.max_shared_memory_bytes << " B\n"

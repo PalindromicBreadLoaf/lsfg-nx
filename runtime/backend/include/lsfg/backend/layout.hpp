@@ -34,6 +34,12 @@ struct DescriptorLayout {
     std::uint32_t storage_images{};
 };
 
+// What the executor has room to record.
+inline constexpr std::uint32_t max_texture_slots = 32;
+inline constexpr std::uint32_t max_storage_slots = 8;
+// A dispatch reaches one uniform buffer, which is all a variant names.
+inline constexpr std::uint32_t max_uniform_slots = 1;
+
 // Gives every image the descriptors the chain actually reaches it through.
 [[nodiscard]] ErrorCode describe(const graph::Graph& graph, DescriptorLayout& out);
 

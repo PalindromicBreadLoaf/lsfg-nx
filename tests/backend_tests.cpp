@@ -1,6 +1,7 @@
 // Copyright 2026 PalindromicBreadLoaf (palindromicbreadloaf@tuta.com)
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <lsfg/backend/binding.hpp>
 #include <lsfg/backend/cache_load.hpp>
 #include <lsfg/backend/layout.hpp>
 
@@ -9,6 +10,7 @@
 #include <lsfg/common/image_graph.hpp>
 #include <lsfg/common/shader_set.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -455,6 +457,168 @@ void test_a_binding_outside_the_graph_is_refused() {
         "a variant reaching past the bindings is refused");
 }
 
+struct Bound {
+    lsfg::cache::Loaded loaded;
+    lsfg::backend::Plan plan;
+    lsfg::backend::DescriptorLayout descriptors;
+};
+
+void build_bound(Bound& out) {
+    build_loaded(out.loaded);
+
+    lsfg::backend::Rejection why;
+    require_accepted(
+        lsfg::backend::accept(out.loaded, handheld_request(), out.plan, why),
+        why,
+        "the cache is one the runtime runs");
+    require(
+        lsfg::succeeded(lsfg::backend::describe(out.loaded.graph, out.descriptors)),
+        "the chain is described");
+}
+
+void test_every_dispatch_binds_what_its_module_declares() {
+    Bound bound;
+    build_bound(bound);
+
+    for (std::uint32_t dispatch = 0; dispatch < bound.plan.dispatches.size(); ++dispatch) {
+        for (std::uint32_t phase = 0; phase < 4; ++phase) {
+            lsfg::backend::DispatchBinding binding;
+            require(
+                lsfg::succeeded(lsfg::backend::bind(
+                    bound.loaded, bound.plan, bound.descriptors, dispatch, phase, binding)),
+                "every dispatch of the chain binds");
+
+            const lsfg::cache::PassEntry& entry = bound.loaded.passes[binding.pass].entry;
+            require(
+                binding.texture_count == entry.texture_slot_count,
+                "every texture slot the module was translated onto is filled");
+            require(
+                binding.storage_count == entry.storage_image_count,
+                "every storage image the module declares is bound");
+            require(
+                (binding.uniform_slot != lsfg::backend::no_slot)
+                    == (entry.uniform_buffer_count != 0),
+                "a uniform buffer is bound exactly when the module takes one");
+
+            std::vector<bool> texture_slots(lsfg::backend::max_texture_slots, false);
+            for (std::uint32_t index = 0; index < binding.texture_count; ++index) {
+                const lsfg::backend::TextureBinding& texture = binding.textures[index];
+                require(!texture_slots[texture.slot], "no two textures share a slot");
+                texture_slots[texture.slot] = true;
+                require(
+                    texture.descriptor < bound.descriptors.image_descriptors,
+                    "a texture names a descriptor inside the table");
+                require(
+                    texture.sampler < lsfg::backend::sampler_descriptor_count,
+                    "a texture names a sampler the backend built");
+            }
+
+            std::vector<bool> storage_slots(lsfg::backend::max_storage_slots, false);
+            for (std::uint32_t index = 0; index < binding.storage_count; ++index) {
+                const lsfg::backend::StorageBinding& storage = binding.storages[index];
+                require(!storage_slots[storage.slot], "no two storage images share a slot");
+                storage_slots[storage.slot] = true;
+                require(
+                    storage.descriptor < bound.descriptors.image_descriptors,
+                    "a storage image names a descriptor inside the table");
+            }
+        }
+    }
+}
+
+void test_the_pass_that_opens_the_chain_binds_the_pyramid() {
+    Bound bound;
+    build_bound(bound);
+
+    lsfg::backend::DispatchBinding first;
+    require(
+        lsfg::succeeded(
+            lsfg::backend::bind(bound.loaded, bound.plan, bound.descriptors, 0, 0, first)),
+        "the first dispatch binds");
+
+    require(first.groups_x == 20 && first.groups_y == 12, "it covers the output");
+    require(first.storage_count == 7, "it writes the whole pyramid at once");
+    require(first.texture_count == 2, "it reads one image through two texture slots");
+    require(
+        first.textures[0].image == first.textures[1].image,
+        "the slot translation introduced reaches the image the module declared");
+    require(
+        first.textures[0].sampler != first.textures[1].sampler,
+        "the introduced slot carries the sampler the module never declared");
+    require(first.uniform_slot != lsfg::backend::no_slot, "it takes the shared constants");
+
+    std::vector<std::uint32_t> written;
+    for (std::uint32_t index = 0; index < first.storage_count; ++index) {
+        written.push_back(first.storages[index].image);
+    }
+    require(
+        std::adjacent_find(written.begin(), written.end()) == written.end(),
+        "no level of the pyramid is written twice");
+
+    lsfg::backend::DispatchBinding second;
+    require(
+        lsfg::succeeded(
+            lsfg::backend::bind(bound.loaded, bound.plan, bound.descriptors, 0, 1, second)),
+        "the next real frame binds");
+    require(
+        first.textures[0].image != second.textures[0].image,
+        "consecutive real frames read different history slots");
+    require(first.variant != second.variant, "each is its own descriptor set");
+
+    lsfg::backend::DispatchBinding third;
+    require(
+        lsfg::succeeded(
+            lsfg::backend::bind(bound.loaded, bound.plan, bound.descriptors, 0, 2, third)),
+        "the frame after that binds");
+    require(third.variant == first.variant, "the history slots alternate rather than run out");
+}
+
+void test_a_slot_table_that_disagrees_with_the_chain_is_refused() {
+    Bound bound;
+    build_bound(bound);
+
+    lsfg::backend::DispatchBinding binding;
+
+    lsfg::cache::Loaded other = bound.loaded;
+    other.passes[0].slots[1].ordinal = 4;
+    require(
+        lsfg::backend::bind(other, bound.plan, bound.descriptors, 0, 0, binding)
+            == lsfg::ErrorCode::shader_interface_mismatch,
+        "a texture slot reading past what the dispatch binds is refused");
+
+    other = bound.loaded;
+    other.passes[0].entry.image_count = 2;
+    require(
+        lsfg::backend::bind(other, bound.plan, bound.descriptors, 0, 0, binding)
+            == lsfg::ErrorCode::shader_interface_mismatch,
+        "a module wanting more images than the dispatch has is refused");
+
+    other = bound.loaded;
+    other.passes[0].slots[0].kind = 0xFF;
+    require(
+        lsfg::backend::bind(other, bound.plan, bound.descriptors, 0, 0, binding)
+            == lsfg::ErrorCode::shader_interface_mismatch,
+        "a slot of no kind the executor binds is refused");
+
+    other = bound.loaded;
+    other.passes[0].slots.pop_back();
+    require(
+        lsfg::backend::bind(other, bound.plan, bound.descriptors, 0, 0, binding)
+            == lsfg::ErrorCode::cache_integrity_failure,
+        "a slot table shorter than the entry says is refused");
+
+    require(
+        lsfg::backend::bind(
+            bound.loaded,
+            bound.plan,
+            bound.descriptors,
+            static_cast<std::uint32_t>(bound.plan.dispatches.size()),
+            0,
+            binding)
+            == lsfg::ErrorCode::invalid_argument,
+        "a dispatch the chain does not have is not bound");
+}
+
 void test_allocations_are_placed_and_overflow_is_caught() {
     lsfg::backend::Arena arena;
 
@@ -493,6 +657,9 @@ int main() {
     test_a_missing_cache_leaves_the_runtime_alone();
     test_every_image_carries_the_descriptors_it_is_reached_through();
     test_a_binding_outside_the_graph_is_refused();
+    test_every_dispatch_binds_what_its_module_declares();
+    test_the_pass_that_opens_the_chain_binds_the_pyramid();
+    test_a_slot_table_that_disagrees_with_the_chain_is_refused();
     test_allocations_are_placed_and_overflow_is_caught();
 
     std::cout << "backend cache tests passed\n";
