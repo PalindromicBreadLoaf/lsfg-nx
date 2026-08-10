@@ -7,6 +7,7 @@
 #include <lsfg/backend/binding.hpp>
 #include <lsfg/backend/cache_load.hpp>
 #include <lsfg/backend/layout.hpp>
+#include <lsfg/backend/schedule.hpp>
 
 #include <lsfg/common/cache_format.hpp>
 #include <lsfg/common/cache_store.hpp>
@@ -286,6 +287,14 @@ int report_acceptance(const lsfg::cache::Loaded& loaded, const Options& options)
         }
     }
 
+    lsfg::backend::Schedule order;
+    if (const lsfg::ErrorCode code = lsfg::backend::schedule(loaded.graph, order);
+        !lsfg::succeeded(code)) {
+        std::cerr << "\nthe chain cannot be run in the order it is recorded in: "
+                  << lsfg::error_name(code) << '\n';
+        return EXIT_FAILURE;
+    }
+
     std::cout << "\nthe runtime accepts this cache at " << plan.output.width << 'x'
               << plan.output.height << ":\n"
               << "  modules          " << loaded.passes.size() << '\n'
@@ -307,6 +316,14 @@ int report_acceptance(const lsfg::cache::Loaded& loaded, const Options& options)
               << "  most scratch     " << plan.max_scratch_bytes_per_warp << " B per warp\n"
               << "  most shared mem  " << plan.max_shared_memory_bytes << " B\n"
               << "  largest dispatch " << widest_groups << " workgroups\n";
+
+    std::cout << "  chain order      " << order.stages[0].count << " in the prepass";
+    for (std::uint32_t frame = 1; frame < order.stages.size(); ++frame) {
+        std::cout << ", then " << order.stages[frame].count << " for generated frame "
+                  << (frame - 1U);
+    }
+    std::cout << "\n  real frames      repeat every " << order.cycle << ", after "
+              << order.warmup_frames << " of warm-up\n";
     return EXIT_SUCCESS;
 }
 
