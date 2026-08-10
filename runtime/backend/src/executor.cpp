@@ -137,6 +137,9 @@ ErrorCode Executor::create(
         return ErrorCode::backend_unavailable;
     }
 
+    hazards_.assign(cache.graph.images.size(), 0);
+    hazard_images_.reserve(cache.graph.images.size());
+
     device_ = &device;
     cache_ = &cache;
     plan_ = &plan;
@@ -154,11 +157,17 @@ void Executor::destroy() noexcept {
         command_memory_ = nullptr;
     }
 
+    hazards_.clear();
+    hazards_.shrink_to_fit();
+    hazard_images_.clear();
+    hazard_images_.shrink_to_fit();
+
     device_ = nullptr;
     cache_ = nullptr;
     plan_ = nullptr;
     resources_ = nullptr;
     recorded_ = 0;
+    barriers_ = 0;
     recording_ = false;
     out_of_memory_ = false;
 }
@@ -172,8 +181,14 @@ void Executor::begin() noexcept {
     dkCmdBufAddMemory(commands_, command_memory_, 0, dkMemBlockGetSize(command_memory_));
 
     recorded_ = 0;
+    barriers_ = 0;
     recording_ = true;
     out_of_memory_ = false;
+
+    for (const std::uint32_t image : hazard_images_) {
+        hazards_[image] = 0;
+    }
+    hazard_images_.clear();
 
     const DescriptorLayout& descriptors = resources_->descriptors();
     dkCmdBufBindImageDescriptorSet(
@@ -201,6 +216,33 @@ ErrorCode Executor::record(const std::uint32_t dispatch, const std::uint32_t pha
     if (shader == nullptr || !dkShaderIsValid(shader)) {
         return ErrorCode::shader_interface_mismatch;
     }
+
+    bool wait = false;
+    std::uint32_t invalidate = 0;
+    for (std::uint32_t index = 0; index < binding.texture_count; ++index) {
+        if ((hazards_[binding.textures[index].image] & hazard_written) != 0) {
+            wait = true;
+            invalidate |= DkInvalidateFlags_Image;
+        }
+    }
+    for (std::uint32_t index = 0; index < binding.storage_count; ++index) {
+        // Anything already touched this batch is a hazard in either direction.
+        constexpr std::uint8_t touched = hazard_read | hazard_written;
+        if ((hazards_[binding.storages[index].image] & touched) != 0) {
+            wait = true;
+        }
+    }
+    if (wait) {
+        barrier(invalidate);
+    }
+
+    for (std::uint32_t index = 0; index < binding.texture_count; ++index) {
+        mark_read(binding.textures[index].image);
+    }
+    for (std::uint32_t index = 0; index < binding.storage_count; ++index) {
+        mark_written(binding.storages[index].image);
+    }
+
     dkCmdBufBindShaders(commands_, DkStageFlag_Compute, &shader, 1);
 
     std::array<DkResHandle, max_texture_slots> textures{};
@@ -249,7 +291,6 @@ ErrorCode Executor::record_stage(
 
     const StageRange& range = schedule.stages[stage];
     for (std::uint32_t index = 0; index < range.count; ++index) {
-        barrier();
         if (const ErrorCode code = record(range.first + index, frame); !succeeded(code)) {
             return code;
         }
@@ -266,10 +307,32 @@ ErrorCode Executor::record_chain(const Schedule& schedule, const std::uint32_t f
     return ErrorCode::ok;
 }
 
-void Executor::barrier() noexcept {
-    if (commands_ != nullptr && recording_) {
-        dkCmdBufBarrier(commands_, DkBarrier_Primitives, DkInvalidateFlags_Image);
+void Executor::barrier(const std::uint32_t invalidate) noexcept {
+    if (commands_ == nullptr || !recording_) {
+        return;
     }
+
+    dkCmdBufBarrier(commands_, DkBarrier_Primitives, invalidate);
+    ++barriers_;
+
+    for (const std::uint32_t image : hazard_images_) {
+        hazards_[image] = 0;
+    }
+    hazard_images_.clear();
+}
+
+void Executor::mark_read(const std::uint32_t image) noexcept {
+    if (hazards_[image] == 0) {
+        hazard_images_.push_back(image);
+    }
+    hazards_[image] |= hazard_read;
+}
+
+void Executor::mark_written(const std::uint32_t image) noexcept {
+    if (hazards_[image] == 0) {
+        hazard_images_.push_back(image);
+    }
+    hazards_[image] |= hazard_written;
 }
 
 ErrorCode Executor::copy(
@@ -316,8 +379,10 @@ ErrorCode Executor::copy(
 
     if (upload) {
         dkCmdBufCopyBufferToImage(commands_, &buffer, &view, &rect, 0);
+        mark_written(image);
     } else {
         dkCmdBufCopyImageToBuffer(commands_, &view, &rect, &buffer, 0);
+        mark_read(image);
     }
     return ErrorCode::ok;
 }

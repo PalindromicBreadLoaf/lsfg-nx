@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <span>
+#include <vector>
 
 namespace lsfg::backend {
 
@@ -81,7 +82,7 @@ public:
     // Records one dispatch of the chain at a real frame index.
     [[nodiscard]] ErrorCode record(std::uint32_t dispatch, std::uint32_t phase);
 
-    // Records one stage at a real frame index, barriered between dispatches.
+    // Records one stage at a real frame index, barriered only where it has to be.
     [[nodiscard]] ErrorCode record_stage(
         const Schedule& schedule,
         std::uint32_t stage,
@@ -90,9 +91,7 @@ public:
     // Records the prepass and every generated frame after it.
     [[nodiscard]] ErrorCode record_chain(const Schedule& schedule, std::uint32_t frame);
 
-    // Every dispatch reads what the ones before it wrote, so nothing in the
-    // chain runs alongside anything else in it.
-    void barrier() noexcept;
+    void barrier(std::uint32_t invalidate = DkInvalidateFlags_Image) noexcept;
 
     [[nodiscard]] ErrorCode record_upload(
         std::uint32_t image,
@@ -111,12 +110,19 @@ public:
         return recorded_;
     }
 
+    [[nodiscard]] std::uint32_t recorded_barriers() const noexcept {
+        return barriers_;
+    }
+
 private:
     [[nodiscard]] ErrorCode copy(
         std::uint32_t image,
         const Staging& staging,
         std::uint64_t offset,
         bool upload) noexcept;
+
+    void mark_read(std::uint32_t image) noexcept;
+    void mark_written(std::uint32_t image) noexcept;
 
     static void out_of_command_memory(void* user, DkCmdBuf commands, std::size_t needed);
 
@@ -128,7 +134,14 @@ private:
     DkMemBlock command_memory_{};
     DkCmdBuf commands_{};
 
+    // Per image, whether it has been read or written since the last barrier.
+    static constexpr std::uint8_t hazard_read = 1U << 0U;
+    static constexpr std::uint8_t hazard_written = 1U << 1U;
+    std::vector<std::uint8_t> hazards_;
+    std::vector<std::uint32_t> hazard_images_;
+
     std::uint32_t recorded_{};
+    std::uint32_t barriers_{};
     bool recording_{};
     bool out_of_memory_{};
 };
