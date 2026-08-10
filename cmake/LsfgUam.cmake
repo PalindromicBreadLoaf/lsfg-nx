@@ -17,6 +17,16 @@ foreach(_tool LSFG_BISON LSFG_FLEX LSFG_PYTHON)
     endif()
 endforeach()
 
+execute_process(
+    COMMAND "${LSFG_PYTHON}" -c "import mako"
+    RESULT_VARIABLE _lsfg_mako
+    OUTPUT_QUIET
+    ERROR_QUIET
+)
+if(NOT _lsfg_mako EQUAL 0)
+    message(FATAL_ERROR "the mako module is not available to ${LSFG_PYTHON}. mesa generates sources with it, so uam cannot be built without it. Install python3-mako, or configure with -DLSFG_BUILD_UAM=OFF to skip uam.")
+endif()
+
 set(_uam_gen "${CMAKE_BINARY_DIR}/uam-generated")
 file(MAKE_DIRECTORY "${_uam_gen}/glsl/glcpp")
 
