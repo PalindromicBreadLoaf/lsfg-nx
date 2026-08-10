@@ -239,6 +239,33 @@ ErrorCode Executor::record(const std::uint32_t dispatch, const std::uint32_t pha
     return ErrorCode::ok;
 }
 
+ErrorCode Executor::record_stage(
+    const Schedule& schedule,
+    const std::uint32_t stage,
+    const std::uint32_t frame) {
+    if (stage >= schedule.stages.size()) {
+        return ErrorCode::invalid_argument;
+    }
+
+    const StageRange& range = schedule.stages[stage];
+    for (std::uint32_t index = 0; index < range.count; ++index) {
+        barrier();
+        if (const ErrorCode code = record(range.first + index, frame); !succeeded(code)) {
+            return code;
+        }
+    }
+    return ErrorCode::ok;
+}
+
+ErrorCode Executor::record_chain(const Schedule& schedule, const std::uint32_t frame) {
+    for (std::uint32_t stage = 0; stage < schedule.stages.size(); ++stage) {
+        if (const ErrorCode code = record_stage(schedule, stage, frame); !succeeded(code)) {
+            return code;
+        }
+    }
+    return ErrorCode::ok;
+}
+
 void Executor::barrier() noexcept {
     if (commands_ != nullptr && recording_) {
         dkCmdBufBarrier(commands_, DkBarrier_Primitives, DkInvalidateFlags_Image);

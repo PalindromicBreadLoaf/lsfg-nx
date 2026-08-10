@@ -8,6 +8,7 @@
 #include <lsfg/backend/binding.hpp>
 #include <lsfg/backend/cache_load.hpp>
 #include <lsfg/backend/device.hpp>
+#include <lsfg/backend/schedule.hpp>
 #include <lsfg/common/cache_store.hpp>
 #include <lsfg/common/error.hpp>
 
@@ -79,6 +80,15 @@ public:
 
     // Records one dispatch of the chain at a real frame index.
     [[nodiscard]] ErrorCode record(std::uint32_t dispatch, std::uint32_t phase);
+
+    // Records one stage at a real frame index, barriered between dispatches.
+    [[nodiscard]] ErrorCode record_stage(
+        const Schedule& schedule,
+        std::uint32_t stage,
+        std::uint32_t frame);
+
+    // Records the prepass and every generated frame after it.
+    [[nodiscard]] ErrorCode record_chain(const Schedule& schedule, std::uint32_t frame);
 
     // Every dispatch reads what the ones before it wrote, so nothing in the
     // chain runs alongside anything else in it.
