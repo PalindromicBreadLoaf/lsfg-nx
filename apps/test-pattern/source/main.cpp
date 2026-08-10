@@ -1,15 +1,14 @@
 // Copyright 2026 PalindromicBreadLoaf (palindromicbreadloaf@tuta.com)
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include <lsfg/backend/binding.hpp>
 #include <lsfg/backend/cache_load.hpp>
 #include <lsfg/backend/device.hpp>
 #include <lsfg/backend/executor.hpp>
+#include <lsfg/backend/schedule.hpp>
 #include <lsfg/common/cache_format.hpp>
 #include <lsfg/common/cache_store.hpp>
 #include <lsfg/common/image_graph.hpp>
 #include <lsfg/common/ring_log.hpp>
-#include <lsfg/common/shader_set.hpp>
 
 #include <switch.h>
 
@@ -30,10 +29,7 @@ constexpr const char* cache_root = "sdmc:/switch/lsfg-nx/cache";
 // Handheld first to limit the pixel workload before anything is measured.
 constexpr lsfg::graph::Extent handheld_extent{.width = 1280, .height = 720};
 
-// The pass that opens the chain.
-constexpr std::string_view first_pass = "mipmaps";
-
-constexpr std::uint32_t no_dispatch = 0xFFFF'FFFFU;
+constexpr std::uint32_t no_image = 0xFFFF'FFFFU;
 
 lsfg::RingLog message_log;
 
@@ -174,18 +170,6 @@ Summary summarise(const std::span<const std::uint8_t> bytes) {
     return out;
 }
 
-std::uint32_t find_dispatch(const lsfg::graph::Graph& graph, const std::string_view name) {
-    const std::span<const lsfg::shaders::ChainSlot> slots = lsfg::shaders::chain_slots();
-
-    for (std::uint32_t index = 0; index < graph.dispatches.size(); ++index) {
-        const std::uint32_t slot = graph.dispatches[index].slot;
-        if (slot < slots.size() && slots[slot].name == name) {
-            return index;
-        }
-    }
-    return no_dispatch;
-}
-
 std::uint64_t image_bytes(const lsfg::backend::ImagePlan& image) {
     return static_cast<std::uint64_t>(image.extent.width) * image.extent.height
         * lsfg::graph::bytes_per_pixel(image.format);
@@ -230,146 +214,267 @@ bool upload_frames(
     return true;
 }
 
-// Runs the dispatch at one real frame index and reads back everything it wrote.
-bool run_pass(
+struct Bar {
+    bool found{};
+    float centre{};
+};
+
+Bar find_bar(const std::span<const std::uint8_t> pixels, const lsfg::graph::Extent extent) {
+    constexpr std::uint32_t background = 210;
+
+    double weight_total = 0;
+    double column_total = 0;
+    for (std::uint32_t y = 0; y < extent.height; ++y) {
+        for (std::uint32_t x = 0; x < extent.width; ++x) {
+            const std::size_t offset = (static_cast<std::size_t>(y) * extent.width + x) * 4U;
+            if (pixels[offset] <= background) {
+                continue;
+            }
+            const double weight = pixels[offset] - background;
+            weight_total += weight;
+            column_total += weight * x;
+        }
+    }
+
+    if (weight_total == 0) {
+        return Bar{};
+    }
+    return Bar{.found = true, .centre = static_cast<float>(column_total / weight_total)};
+}
+
+void print_bar(const Bar& bar) {
+    if (!bar.found) {
+        std::printf("   none");
+        return;
+    }
+    const auto tenths = static_cast<std::uint32_t>((bar.centre * 10.0F) + 0.5F);
+    std::printf("%5u.%u", tenths / 10U, tenths % 10U);
+}
+
+// One real frame's worth of work.
+bool run_frame(
     lsfg::backend::Executor& executor,
-    lsfg::backend::Staging& staging,
-    const lsfg::backend::Plan& plan,
-    const lsfg::backend::DispatchBinding& binding,
-    const std::uint32_t dispatch,
-    const std::uint32_t phase,
-    std::vector<Summary>& out,
+    const lsfg::backend::Schedule& order,
+    const std::uint32_t frame,
     std::uint64_t& elapsed_ns) {
     const std::uint64_t started = armGetSystemTick();
 
     executor.begin();
-    if (const lsfg::ErrorCode code = executor.record(dispatch, phase); !lsfg::succeeded(code)) {
-        report_failure(code, "recording the dispatch");
+    if (const lsfg::ErrorCode code = executor.record_chain(order, frame); !lsfg::succeeded(code)) {
+        report_failure(code, "recording the chain");
         return false;
     }
     if (const lsfg::ErrorCode code = executor.run(); !lsfg::succeeded(code)) {
-        report_failure(code, "running the dispatch");
+        report_failure(code, "running the chain");
         return false;
     }
 
     elapsed_ns = armTicksToNs(armGetSystemTick() - started);
+    return true;
+}
 
-    executor.begin();
-    executor.barrier();
+bool run_frame_by_stage(
+    lsfg::backend::Executor& executor,
+    const lsfg::backend::Schedule& order,
+    const std::uint32_t frame,
+    const std::span<std::uint64_t> elapsed_ns) {
+    for (std::uint32_t stage = 0; stage < order.stages.size(); ++stage) {
+        const std::uint64_t started = armGetSystemTick();
 
-    std::uint64_t offset = 0;
-    for (std::uint32_t index = 0; index < binding.storage_count; ++index) {
-        const std::uint32_t image = binding.storages[index].image;
-        if (const lsfg::ErrorCode code = executor.record_download(image, staging, offset);
+        executor.begin();
+        if (const lsfg::ErrorCode code = executor.record_stage(order, stage, frame);
             !lsfg::succeeded(code)) {
-            report_failure(code, "recording a readback");
+            report_failure(code, "recording a stage");
             return false;
         }
-        offset += image_bytes(plan.images[image]);
-    }
+        if (const lsfg::ErrorCode code = executor.run(); !lsfg::succeeded(code)) {
+            report_failure(code, "running a stage");
+            return false;
+        }
 
-    if (const lsfg::ErrorCode code = executor.run(); !lsfg::succeeded(code)) {
-        report_failure(code, "reading the result back");
-        return false;
-    }
-
-    out.clear();
-    offset = 0;
-    for (std::uint32_t index = 0; index < binding.storage_count; ++index) {
-        const std::uint64_t bytes = image_bytes(plan.images[binding.storages[index].image]);
-        out.push_back(summarise(staging.bytes().subspan(offset, bytes)));
-        offset += bytes;
+        elapsed_ns[stage] = armTicksToNs(armGetSystemTick() - started);
     }
     return true;
 }
 
-bool dispatch_first_pass(
+bool read_image(
+    lsfg::backend::Executor& executor,
+    lsfg::backend::Staging& staging,
+    const std::uint32_t image) {
+    executor.begin();
+    executor.barrier();
+
+    if (const lsfg::ErrorCode code = executor.record_download(image, staging, 0);
+        !lsfg::succeeded(code)) {
+        report_failure(code, "recording a readback");
+        return false;
+    }
+    if (const lsfg::ErrorCode code = executor.run(); !lsfg::succeeded(code)) {
+        report_failure(code, "reading the generated frame back");
+        return false;
+    }
+    return true;
+}
+
+std::uint32_t find_generated_image(const lsfg::backend::Plan& plan) {
+    for (std::uint32_t index = 0; index < plan.images.size(); ++index) {
+        if (plan.images[index].role == lsfg::graph::ImageRole::generated) {
+            return index;
+        }
+    }
+    return no_image;
+}
+
+bool dispatch_whole_chain(
     lsfg::backend::Executor& executor,
     lsfg::backend::Staging& staging,
     const lsfg::cache::Loaded& cache,
-    const lsfg::backend::Plan& plan,
-    const lsfg::backend::DescriptorLayout& descriptors) {
-    const std::uint32_t dispatch = find_dispatch(cache.graph, first_pass);
-    if (dispatch == no_dispatch) {
-        report_failure(lsfg::ErrorCode::shader_set_unknown, "finding the first pass");
-        return false;
-    }
-
-    lsfg::backend::DispatchBinding binding;
-    if (const lsfg::ErrorCode code
-        = lsfg::backend::bind(cache, plan, descriptors, dispatch, 0, binding);
+    const lsfg::backend::Plan& plan) {
+    lsfg::backend::Schedule order;
+    if (const lsfg::ErrorCode code = lsfg::backend::schedule(cache.graph, order);
         !lsfg::succeeded(code)) {
-        report_failure(code, "binding the first pass");
+        report_failure(code, "putting the chain in order");
         return false;
     }
 
+    const std::uint32_t generated = find_generated_image(plan);
+    if (generated == no_image) {
+        report_failure(lsfg::ErrorCode::invalid_state, "finding the generated frame");
+        return false;
+    }
+
+    std::printf("\nchain      %u dispatches: %u in the prepass", order.dispatches(), order.stages[0].count);
+    for (std::uint32_t stage = 1; stage < order.stages.size(); ++stage) {
+        std::printf(", %u for generated frame %u", order.stages[stage].count, stage - 1U);
+    }
     std::printf(
-        "\n%.*s: dispatch %u, module %u, %u textures, %u storage images, %ux%u groups\n",
-        static_cast<int>(first_pass.size()),
-        first_pass.data(),
-        dispatch,
-        binding.pass,
-        binding.texture_count,
-        binding.storage_count,
-        binding.groups_x,
-        binding.groups_y);
+        "\nreal frames repeat every %u, after %u of warm-up\n",
+        order.cycle,
+        order.warmup_frames);
     consoleUpdate(nullptr);
 
     if (!upload_frames(executor, staging, plan)) {
         return false;
     }
 
-    std::array<std::vector<Summary>, 3> results;
-    std::array<std::uint64_t, 3> elapsed{};
-    constexpr std::array<std::uint32_t, 3> phases{0, 1, 0};
+    const std::uint64_t frame_bytes = image_bytes(plan.images[0]);
+    std::array<Bar, lsfg::graph::history_image_count> real{};
+    for (std::uint32_t frame = 0; frame < real.size(); ++frame) {
+        real[frame] = find_bar(
+            staging.bytes().subspan(frame * frame_bytes, frame_bytes),
+            plan.images[frame].extent);
+    }
+    if (!real[0].found || !real[1].found) {
+        report_failure(lsfg::ErrorCode::invalid_state, "finding the bar in the real frames");
+        return false;
+    }
 
-    for (std::size_t run = 0; run < results.size(); ++run) {
-        if (!run_pass(
-                executor, staging, plan, binding, dispatch, phases[run], results[run], elapsed[run])) {
+    std::uint64_t warming_ns = 0;
+    for (std::uint32_t frame = 0; frame < order.cycle; ++frame) {
+        std::uint64_t elapsed = 0;
+        if (!run_frame(executor, order, frame, elapsed)) {
             return false;
         }
+        warming_ns += elapsed;
     }
 
-    std::printf("\nlevel  extent      mean  min  max  written  frame 0     frame 1\n");
-    for (std::size_t level = 0; level < results[0].size(); ++level) {
-        const lsfg::graph::Extent extent
-            = plan.images[binding.storages[level].image].extent;
-        const Summary& first = results[0][level];
-        const Summary& second = results[1][level];
-        const std::uint64_t pixels = static_cast<std::uint64_t>(extent.width) * extent.height;
+    const std::array<std::uint32_t, 3> frames{order.cycle, order.cycle + 1U, 2U * order.cycle};
+    std::array<Summary, 3> summaries{};
+    std::array<Bar, 3> bars{};
+    std::array<std::uint64_t, 3> elapsed{};
 
+    const lsfg::graph::Extent extent = plan.images[generated].extent;
+    const std::uint64_t generated_bytes = image_bytes(plan.images[generated]);
+
+    for (std::size_t run = 0; run < frames.size(); ++run) {
+        if (!run_frame(executor, order, frames[run], elapsed[run])) {
+            return false;
+        }
+        if (!read_image(executor, staging, generated)) {
+            return false;
+        }
+
+        const std::span<const std::uint8_t> pixels = staging.bytes().subspan(0, generated_bytes);
+        summaries[run] = summarise(pixels);
+        bars[run] = find_bar(pixels, extent);
+    }
+
+    std::vector<std::uint64_t> per_stage(order.stages.size(), 0);
+    if (!run_frame_by_stage(executor, order, frames[0], per_stage)) {
+        return false;
+    }
+
+    std::printf("\nframe  mean  min  max  nonzero  crc         bar\n");
+    for (std::size_t run = 0; run < frames.size(); ++run) {
         std::printf(
-            "%zu      %4ux%-4u  %4u  %3u  %3u  %5llu%%  %08lx  %08lx\n",
-            level,
-            extent.width,
-            extent.height,
-            first.mean,
-            first.minimum,
-            first.maximum,
-            static_cast<unsigned long long>((first.written * 100ULL) / std::max<std::uint64_t>(pixels, 1)),
-            static_cast<unsigned long>(first.crc),
-            static_cast<unsigned long>(second.crc));
+            "%5u  %4u  %3u  %3u  %5llu%%  %08lx  ",
+            frames[run],
+            summaries[run].mean,
+            summaries[run].minimum,
+            summaries[run].maximum,
+            static_cast<unsigned long long>(
+                (summaries[run].written * 100ULL) / std::max<std::uint64_t>(generated_bytes, 1)),
+            static_cast<unsigned long>(summaries[run].crc));
+        print_bar(bars[run]);
+        std::printf("\n");
     }
 
-    bool wrote_everything = true;
-    bool motion_is_visible = false;
-    bool repeatable = results[0].size() == results[2].size();
-    for (std::size_t level = 0; level < results[0].size(); ++level) {
-        wrote_everything = wrote_everything && results[0][level].written != 0;
-        motion_is_visible = motion_is_visible || results[0][level].crc != results[1][level].crc;
-        repeatable = repeatable && results[0][level].crc == results[2][level].crc;
+    std::printf("%-41s", "real");
+    print_bar(real[0]);
+    std::printf(" and");
+    print_bar(real[1]);
+    std::printf("\n");
+
+    const float lower = std::min(real[0].centre, real[1].centre);
+    const float upper = std::max(real[0].centre, real[1].centre);
+
+    bool interpolated = true;
+    for (std::size_t run = 0; run < frames.size(); ++run) {
+        interpolated = interpolated && bars[run].found && bars[run].centre > lower
+            && bars[run].centre < upper;
     }
 
-    std::printf("\n%s\n", wrote_everything ? "every storage image was written" : "AN IMAGE WAS LEFT ZERO");
-    std::printf("%s\n", motion_is_visible ? "the two frames give different results" : "BOTH FRAMES GAVE THE SAME RESULT");
-    std::printf("%s\n", repeatable ? "the same frame gives the same result twice" : "THE SAME FRAME GAVE TWO RESULTS");
+    const bool wrote_anything = summaries[0].written != 0;
+    const bool motion_is_visible = summaries[0].crc != summaries[1].crc;
+    const bool repeatable = summaries[0].crc == summaries[2].crc;
+
     std::printf(
-        "dispatch and wait %llu us, %llu us, %llu us\n",
-        static_cast<unsigned long long>(elapsed[0] / 1000ULL),
-        static_cast<unsigned long long>(elapsed[1] / 1000ULL),
-        static_cast<unsigned long long>(elapsed[2] / 1000ULL));
+        "\n%s\n",
+        wrote_anything ? "the generated frame was written" : "THE GENERATED FRAME WAS LEFT ZERO");
+    std::printf(
+        "%s\n",
+        interpolated ? "the bar lands between the two real frames"
+                     : "THE BAR IS NOT BETWEEN THE TWO REAL FRAMES");
+    std::printf(
+        "%s\n",
+        motion_is_visible ? "consecutive frames give different results"
+                          : "CONSECUTIVE FRAMES GAVE THE SAME RESULT");
+    std::printf(
+        "%s\n",
+        repeatable ? "a cycle apart gives the same result" : "A CYCLE APART GAVE TWO RESULTS");
 
-    return wrote_everything && motion_is_visible && repeatable;
+    const auto us = [](const std::uint64_t ns) {
+        return static_cast<unsigned long long>(ns / 1000ULL);
+    };
+
+    std::printf(
+        "\nwhole chain %llu us, %llu us, %llu us, against 16667 us at 60 Hz\n",
+        us(elapsed[0]),
+        us(elapsed[1]),
+        us(elapsed[2]));
+    std::printf("warm-up     %llu us over %u frames\n", us(warming_ns), order.cycle);
+    // Each of these is drained on its own, so they include a queue bubble the
+    // whole-chain figure above does not.
+    std::printf("  prepass   %llu us over %u dispatches\n", us(per_stage[0]), order.stages[0].count);
+    for (std::uint32_t stage = 1; stage < order.stages.size(); ++stage) {
+        std::printf(
+            "  frame %u   %llu us over %u dispatches\n",
+            stage - 1U,
+            us(per_stage[stage]),
+            order.stages[stage].count);
+    }
+
+    return wrote_anything && interpolated && motion_is_visible && repeatable;
 }
 
 bool run() {
@@ -454,7 +559,7 @@ bool run() {
         return false;
     }
 
-    if (!dispatch_first_pass(executor, staging, cache, plan, resources.descriptors())) {
+    if (!dispatch_whole_chain(executor, staging, cache, plan)) {
         if (!device.last_error().empty()) {
             std::printf("%s\n", device.last_error().data());
         }
@@ -462,7 +567,7 @@ bool run() {
     }
 
     message_log.push(
-        armGetSystemTick(), lsfg::LogLevel::info, lsfg::ErrorCode::ok, "first pass dispatched");
+        armGetSystemTick(), lsfg::LogLevel::info, lsfg::ErrorCode::ok, "whole chain dispatched");
     return true;
 }
 

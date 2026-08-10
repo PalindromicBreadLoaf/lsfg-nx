@@ -7,7 +7,6 @@ target_link_libraries(
         lsfg::cache_store
         lsfg::image_graph
         lsfg::logging
-        lsfg::shader_set
         lsfg_project_options
 )
 
