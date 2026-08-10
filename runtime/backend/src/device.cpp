@@ -55,9 +55,9 @@ void describe_sampler(const std::uint32_t index, DkSampler& out) noexcept {
     }
 }
 
-[[nodiscard]] std::uint32_t image_flags(const graph::ImageRole role) noexcept {
+[[nodiscard]] std::uint32_t image_flags(const graph::ImageRole role, const bool copyable) noexcept {
     std::uint32_t flags = DkImageFlags_UsageLoadStore;
-    if (role != graph::ImageRole::internal && role != graph::ImageRole::constant) {
+    if (copyable || (role != graph::ImageRole::internal && role != graph::ImageRole::constant)) {
         // A frame that presentation would have supplied is copied rather than
         // computed, so a stand-in for one has to be reachable by the 2D engine.
         flags |= DkImageFlags_Usage2DEngine;
@@ -195,7 +195,7 @@ ErrorCode Resources::lay_out_images(
         DkImageLayoutMaker maker;
         dkImageLayoutMakerDefaults(&maker, device);
         maker.type = DkImageType_2D;
-        maker.flags = image_flags(image.role);
+        maker.flags = image_flags(image.role, options.copyable_images);
         maker.format = format;
         maker.dimensions[0] = image.extent.width;
         maker.dimensions[1] = image.extent.height;

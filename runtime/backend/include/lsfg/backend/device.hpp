@@ -67,6 +67,9 @@ struct ResourceOptions {
     // With no presentation to import from, a standalone harness asks for
     // deko-owned stand ins for the frames a game would supply.
     bool own_imported_images{};
+    // A harness reads intermediate images back to check them, and the copy
+    // engine can only reach an image that was laid out for it.
+    bool copyable_images{};
     std::uint64_t memory_budget_bytes{default_memory_budget_bytes};
 };
 
