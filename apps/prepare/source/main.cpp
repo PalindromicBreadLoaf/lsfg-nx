@@ -14,9 +14,12 @@
 
 #include <malloc.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -28,6 +31,25 @@ constexpr const char* cache_root = "sdmc:/switch/lsfg-nx/cache";
 // The extent the first target runs at in handheld mode, used only to report
 // what the chain would allocate.
 constexpr lsfg::graph::Extent handheld_extent{.width = 1280, .height = 720};
+
+// The configurations worth measuring against a frame budget. Every one of them
+// lands in its own cache directory since the graph options are part of the
+// cache key.
+struct Candidate {
+    const char* name;
+    lsfg::graph::Config graph;
+};
+
+constexpr std::array<Candidate, 8> candidates{{
+    {"quality 1:1", {.flow_numerator = 1, .flow_denominator = 1}},
+    {"performance 1:1", {.performance = true, .flow_numerator = 1, .flow_denominator = 1}},
+    {"quality 1:2", {.flow_numerator = 1, .flow_denominator = 2}},
+    {"performance 1:2", {.performance = true, .flow_numerator = 1, .flow_denominator = 2}},
+    {"quality 1:3", {.flow_numerator = 1, .flow_denominator = 3}},
+    {"performance 1:3", {.performance = true, .flow_numerator = 1, .flow_denominator = 3}},
+    {"quality 1:4", {.flow_numerator = 1, .flow_denominator = 4}},
+    {"performance 1:4", {.performance = true, .flow_numerator = 1, .flow_denominator = 4}},
+}};
 
 lsfg::RingLog message_log;
 
@@ -107,20 +129,15 @@ void report_acceptance(const lsfg::cache::Loaded& cache, const lsfg::graph::Conf
         plan.max_scratch_bytes_per_warp);
 }
 
-bool prepare_dll() {
+// One configuration's worth of preparation. Only the first reports module
+// compilation since they all would be the same.
+bool prepare_one(
+    const std::span<const std::uint8_t> image,
+    const Candidate& candidate,
+    const bool verbose) {
     const std::size_t startup_heap = heap_in_use();
 
-    const std::vector<std::uint8_t> image = read_dll();
-    if (image.empty()) {
-        report_failure(lsfg::ErrorCode::io_error, "reading the DLL");
-        std::printf("Copy your own Lossless.dll to\n%s\n", dll_path);
-        return false;
-    }
-
-    std::printf("size      %zu bytes\n", image.size());
-    consoleUpdate(nullptr);
-
-    const lsfg::prepare::Options options;
+    const lsfg::prepare::Options options{.graph = candidate.graph};
     lsfg::prepare::Result result;
 
     // The NRO holds the DLL, the GLSL, and uam at once, and this is the only
@@ -128,21 +145,28 @@ bool prepare_dll() {
     // inside a compile, so the figure is a floor rather than the true peak.
     std::size_t peak_heap = heap_in_use();
 
+    std::uint32_t compiled = 0;
+
     const std::uint64_t started = armGetSystemTick();
     const lsfg::ErrorCode prepared = lsfg::prepare::run(
         image,
         options,
         result,
-        [&peak_heap](const lsfg::prepare::ModuleReport& module) {
+        [&peak_heap, &compiled, verbose](const lsfg::prepare::ModuleReport& module) {
             const std::size_t in_use = heap_in_use();
             peak_heap = peak_heap > in_use ? peak_heap : in_use;
 
-            std::printf(
-                "%-10s %6zu B GLSL %5zu B DKSH %3u regs\n",
-                module.name.c_str(),
-                module.glsl_bytes,
-                module.dksh_bytes,
-                module.registers);
+            ++compiled;
+            if (verbose) {
+                std::printf(
+                    "%-10s %6zu B GLSL %5zu B DKSH %3u regs\n",
+                    module.name.c_str(),
+                    module.glsl_bytes,
+                    module.dksh_bytes,
+                    module.registers);
+            } else {
+                std::printf("\r  %u modules compiled", compiled);
+            }
             consoleUpdate(nullptr);
         });
 
@@ -152,9 +176,11 @@ bool prepare_dll() {
 
     // The hash and the key are known even when a later stage refuses the DLL,
     // and they are the first thing worth reporting about an unknown one.
-    std::printf("sha256    %s\n", lsfg::to_hex(result.dll_hash).data());
-    std::printf("cache key %s\n\n", lsfg::to_hex(result.key).data());
-    consoleUpdate(nullptr);
+    if (verbose) {
+        std::printf("sha256    %s\n", lsfg::to_hex(result.dll_hash).data());
+        std::printf("cache key %s\n\n", lsfg::to_hex(result.key).data());
+        consoleUpdate(nullptr);
+    }
 
     if (!lsfg::succeeded(prepared)) {
         report_failure(prepared, "preparation");
@@ -174,26 +200,37 @@ bool prepare_dll() {
         worst_scratch = worst_scratch > module.scratch_bytes ? worst_scratch : module.scratch_bytes;
     }
 
-    std::printf(
-        "\n%zu modules: %zu B of GLSL, %zu B of DKSH in %llu ms\n",
-        result.reports.size(),
-        glsl_bytes,
-        dksh_bytes,
-        static_cast<unsigned long long>(elapsed_ms));
-    std::printf("most registers %u, most scratch %u B per warp\n", worst_gprs, worst_scratch);
-    std::printf(
-        "peak heap %zu KiB between modules, %zu KiB at startup\n",
-        peak_heap / 1024U,
-        startup_heap / 1024U);
-
     const lsfg::graph::Graph& graph = result.contents.graph;
-    std::printf(
-        "%zu dispatches over %zu images, %llu KiB at %ux%u\n\n",
-        graph.dispatches.size(),
-        graph.images.size(),
-        static_cast<unsigned long long>(lsfg::graph::owned_memory_bytes(graph, handheld_extent) / 1024U),
-        handheld_extent.width,
-        handheld_extent.height);
+    const auto owned_kib = static_cast<unsigned long long>(
+        lsfg::graph::owned_memory_bytes(graph, handheld_extent) / 1024U);
+
+    if (verbose) {
+        std::printf(
+            "\n%zu modules: %zu B of GLSL, %zu B of DKSH in %llu ms\n",
+            result.reports.size(),
+            glsl_bytes,
+            dksh_bytes,
+            static_cast<unsigned long long>(elapsed_ms));
+        std::printf("most registers %u, most scratch %u B per warp\n", worst_gprs, worst_scratch);
+        std::printf(
+            "peak heap %zu KiB between modules, %zu KiB at startup\n",
+            peak_heap / 1024U,
+            startup_heap / 1024U);
+        std::printf(
+            "%zu dispatches over %zu images, %llu KiB at %ux%u\n\n",
+            graph.dispatches.size(),
+            graph.images.size(),
+            owned_kib,
+            handheld_extent.width,
+            handheld_extent.height);
+    } else {
+        std::printf(
+            "\r  %zu modules, %zu images, %llu KiB in %llu ms\n",
+            result.reports.size(),
+            graph.images.size(),
+            owned_kib,
+            static_cast<unsigned long long>(elapsed_ms));
+    }
     consoleUpdate(nullptr);
 
     const std::string directory = lsfg::prepare::directory_for(cache_root, result);
@@ -202,7 +239,7 @@ bool prepare_dll() {
     // so this run says whether compiling twice on this console lands in the
     // same place.
     lsfg::cache::Loaded existing;
-    if (lsfg::succeeded(lsfg::cache::read(directory, existing))) {
+    if (verbose && lsfg::succeeded(lsfg::cache::read(directory, existing))) {
         const lsfg::cache::Comparison comparison
             = lsfg::cache::compare(existing, result.contents);
 
@@ -243,11 +280,55 @@ bool prepare_dll() {
         return false;
     }
 
-    std::printf("\ncache written and verified:\n%s\n", directory.c_str());
+    if (verbose) {
+        std::printf("\ncache written and verified:\n%s\n", directory.c_str());
+        report_acceptance(written, options.graph);
+    } else {
+        std::printf("  written and verified\n");
+    }
     message_log.push(armGetSystemTick(), lsfg::LogLevel::info, lsfg::ErrorCode::ok, "cache written");
-
-    report_acceptance(written, options.graph);
+    consoleUpdate(nullptr);
     return true;
+}
+
+bool prepare_dll(PadState& pad) {
+    const std::vector<std::uint8_t> image = read_dll();
+    if (image.empty()) {
+        report_failure(lsfg::ErrorCode::io_error, "reading the DLL");
+        std::printf("Copy your own Lossless.dll to\n%s\n", dll_path);
+        return false;
+    }
+
+    std::printf("size      %zu bytes\n", image.size());
+    std::printf("sha256    %s\n\n", lsfg::to_hex(lsfg::sha256(image)).data());
+    std::printf("%zu configurations to prepare, + to stop after the current one\n\n",
+        candidates.size());
+    consoleUpdate(nullptr);
+
+    std::uint32_t prepared = 0;
+    for (std::size_t index = 0; index < candidates.size(); ++index) {
+        const Candidate& candidate = candidates[index];
+
+        std::printf("[%zu/%zu] %s\n", index + 1U, candidates.size(), candidate.name);
+        consoleUpdate(nullptr);
+
+        if (!prepare_one(image, candidate, index == 0)) {
+            std::printf("  giving up on %s\n", candidate.name);
+            consoleUpdate(nullptr);
+            continue;
+        }
+        ++prepared;
+
+        padUpdate(&pad);
+        if ((padGetButtonsDown(&pad) & HidNpadButton_Plus) != 0U) {
+            std::printf("\nstopped after %u of %zu\n", prepared, candidates.size());
+            break;
+        }
+    }
+
+    std::printf("\n%u of %zu configurations prepared into\n%s\n",
+        prepared, candidates.size(), cache_root);
+    return prepared != 0;
 }
 
 } // namespace
@@ -263,7 +344,7 @@ int main() {
     std::printf("file      %s\n", dll_path);
     consoleUpdate(nullptr);
 
-    static_cast<void>(prepare_dll());
+    static_cast<void>(prepare_dll(pad));
 
     std::printf("\nPress + to exit.\n");
 
