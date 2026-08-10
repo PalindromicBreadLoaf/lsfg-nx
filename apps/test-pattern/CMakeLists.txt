@@ -3,9 +3,11 @@ target_link_libraries(
     lsfg_test_pattern
     PRIVATE
         lsfg::backend
+        lsfg::cache_format
         lsfg::cache_store
         lsfg::image_graph
         lsfg::logging
+        lsfg::shader_set
         lsfg_project_options
 )
 
