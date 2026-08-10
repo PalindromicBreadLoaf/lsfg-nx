@@ -4,6 +4,7 @@
 #include <lsfg/backend/binding.hpp>
 #include <lsfg/backend/cache_load.hpp>
 #include <lsfg/backend/layout.hpp>
+#include <lsfg/backend/schedule.hpp>
 
 #include <lsfg/common/cache_store.hpp>
 #include <lsfg/common/dksh.hpp>
@@ -646,6 +647,71 @@ void test_allocations_are_placed_and_overflow_is_caught() {
     require(full.block_size() == 0, "an arena that overflowed sizes no block");
 }
 
+void test_the_chain_runs_in_stage_order() {
+    lsfg::graph::Graph graph;
+    require(lsfg::succeeded(lsfg::graph::build(lsfg::graph::Config{}, graph)), "the graph builds");
+
+    lsfg::backend::Schedule order;
+    require(
+        lsfg::succeeded(lsfg::backend::schedule(graph, order)), "the chain is put in run order");
+
+    require(order.stages.size() == 2, "one generated frame is one stage after the prepass");
+    require(order.stages[0].first == 0, "the prepass opens the chain");
+    require(order.stages[0].count == 34, "the prepass is 34 dispatches");
+    require(order.stages[1].first == 34, "the generated frame follows it");
+    require(order.stages[1].count == 66, "a generated frame is 66 dispatches");
+    require(order.dispatches() == graph.dispatches.size(), "every dispatch is in a stage");
+    require(order.generated_frames() == 1, "one generated frame is scheduled");
+    require(order.cycle == 6, "the real frame index repeats every six frames");
+    require(order.warmup_frames == 2, "two real frames go in before one comes out whole");
+
+    lsfg::graph::Config pair;
+    pair.generated_frames = 2;
+
+    lsfg::graph::Graph second;
+    require(lsfg::succeeded(lsfg::graph::build(pair, second)), "a two-frame graph builds");
+    require(lsfg::succeeded(lsfg::backend::schedule(second, order)), "and is put in run order");
+    require(order.stages.size() == 3, "each generated frame is a stage of its own");
+    require(order.stages[0].count == 34, "which leaves the prepass shared");
+    require(
+        order.stages[1].count == order.stages[2].count, "and every generated frame the same size");
+}
+
+void test_a_stage_out_of_order_is_refused() {
+    lsfg::graph::Graph graph;
+    require(lsfg::succeeded(lsfg::graph::build(lsfg::graph::Config{}, graph)), "the graph builds");
+
+    // The chain closes on the generated frame. Putting that dispatch back in
+    // the prepass leaves the prepass in two pieces with a stage between them.
+    graph.dispatches.back().stage = lsfg::graph::prepass_stage;
+
+    lsfg::backend::Schedule order;
+    require(
+        lsfg::backend::schedule(graph, order) == lsfg::ErrorCode::presentation_sequence_invalid,
+        "a stage split in two is refused");
+}
+
+void test_an_image_nothing_writes_is_refused() {
+    lsfg::graph::Graph graph;
+    require(lsfg::succeeded(lsfg::graph::build(lsfg::graph::Config{}, graph)), "the graph builds");
+
+    const auto stray = static_cast<std::uint32_t>(graph.images.size());
+    graph.images.push_back(lsfg::graph::ImageDesc{
+        .base = static_cast<std::uint8_t>(lsfg::graph::ExtentBase::output),
+        .format = static_cast<std::uint8_t>(lsfg::graph::Format::rgba8),
+        .role = static_cast<std::uint8_t>(lsfg::graph::ImageRole::internal)});
+
+    const lsfg::graph::VariantEntry& variant
+        = graph.variants[graph.dispatches.back().variant_first];
+    require(variant.texture_count != 0, "the closing pass reads something");
+    graph.bindings[variant.binding_first] = stray;
+
+    lsfg::backend::Schedule order;
+    require(
+        lsfg::backend::schedule(graph, order) == lsfg::ErrorCode::cache_integrity_failure,
+        "a read of an image nothing fills is refused however long the chain runs");
+}
+
 } // namespace
 
 int main() {
@@ -661,6 +727,9 @@ int main() {
     test_the_pass_that_opens_the_chain_binds_the_pyramid();
     test_a_slot_table_that_disagrees_with_the_chain_is_refused();
     test_allocations_are_placed_and_overflow_is_caught();
+    test_the_chain_runs_in_stage_order();
+    test_a_stage_out_of_order_is_refused();
+    test_an_image_nothing_writes_is_refused();
 
     std::cout << "backend cache tests passed\n";
     return EXIT_SUCCESS;
