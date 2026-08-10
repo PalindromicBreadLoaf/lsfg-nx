@@ -59,40 +59,48 @@ std::vector<std::string> cache_directories() {
     return directories;
 }
 
-bool find_cache(lsfg::cache::Loaded& cache, lsfg::backend::Plan& plan, std::string& directory) {
+void name_config(const lsfg::graph::Config& config, const std::span<char> out) {
+    std::snprintf(
+        out.data(),
+        out.size(),
+        "%s %u:%u",
+        config.performance ? "performance" : "quality",
+        config.flow_numerator,
+        config.flow_denominator);
+}
+
+bool load_cache(
+    const std::string& directory,
+    lsfg::cache::Loaded& cache,
+    lsfg::backend::Plan& plan) {
+    lsfg::cache::Loaded loaded;
+    if (const lsfg::ErrorCode code = lsfg::cache::read(directory, loaded);
+        !lsfg::succeeded(code)) {
+        std::printf("skipped %s: %.*s\n",
+            directory.c_str(),
+            static_cast<int>(lsfg::error_name(code).size()),
+            lsfg::error_name(code).data());
+        return false;
+    }
+
     const lsfg::backend::Request request{
-        .config = lsfg::graph::Config{},
+        .config = loaded.graph.config,
         .precision = lsfg::cache::Precision::high,
         .output = handheld_extent,
     };
 
-    for (const std::string& candidate : cache_directories()) {
-        lsfg::cache::Loaded loaded;
-        if (const lsfg::ErrorCode code = lsfg::cache::read(candidate, loaded);
-            !lsfg::succeeded(code)) {
-            std::printf("skipped %s: %.*s\n",
-                candidate.c_str(),
-                static_cast<int>(lsfg::error_name(code).size()),
-                lsfg::error_name(code).data());
-            continue;
-        }
-
-        lsfg::backend::Rejection why;
-        if (!lsfg::backend::accept(loaded, request, plan, why)) {
-            std::printf(
-                "refused %s: %.*s\n",
-                candidate.c_str(),
-                static_cast<int>(why.reason.size()),
-                why.reason.data());
-            continue;
-        }
-
-        cache = std::move(loaded);
-        directory = candidate;
-        return true;
+    lsfg::backend::Rejection why;
+    if (!lsfg::backend::accept(loaded, request, plan, why)) {
+        std::printf(
+            "refused %s: %.*s\n",
+            directory.c_str(),
+            static_cast<int>(why.reason.size()),
+            why.reason.data());
+        return false;
     }
 
-    return false;
+    cache = std::move(loaded);
+    return true;
 }
 
 void report_allocation(const lsfg::backend::Plan& plan, const lsfg::backend::Allocation& taken) {
@@ -251,12 +259,32 @@ void print_bar(const Bar& bar) {
     std::printf("%5u.%u", tenths / 10U, tenths % 10U);
 }
 
+// One configuration measured end to end.
+struct Row {
+    lsfg::graph::Config config{};
+    lsfg::graph::Extent flow{};
+    std::uint32_t images{};
+    std::uint64_t memory_kib{};
+    // The fastest of the sampled frames.
+    std::uint64_t frame_ns{};
+    // What went wrong (ideally nothing).
+    const char* failed{};
+    bool measured{};
+};
+
+struct FrameCost {
+    std::uint64_t elapsed_ns{};
+    // Building the command list on the CPU, which the elapsed figure contains.
+    std::uint64_t recording_ns{};
+    std::uint32_t barriers{};
+};
+
 // One real frame's worth of work.
 bool run_frame(
     lsfg::backend::Executor& executor,
     const lsfg::backend::Schedule& order,
     const std::uint32_t frame,
-    std::uint64_t& elapsed_ns) {
+    FrameCost& cost) {
     const std::uint64_t started = armGetSystemTick();
 
     executor.begin();
@@ -264,12 +292,17 @@ bool run_frame(
         report_failure(code, "recording the chain");
         return false;
     }
+
+    const std::uint64_t recorded = armGetSystemTick();
+
     if (const lsfg::ErrorCode code = executor.run(); !lsfg::succeeded(code)) {
         report_failure(code, "running the chain");
         return false;
     }
 
-    elapsed_ns = armTicksToNs(armGetSystemTick() - started);
+    cost.elapsed_ns = armTicksToNs(armGetSystemTick() - started);
+    cost.recording_ns = armTicksToNs(recorded - started);
+    cost.barriers = executor.recorded_barriers();
     return true;
 }
 
@@ -301,8 +334,8 @@ bool read_image(
     lsfg::backend::Executor& executor,
     lsfg::backend::Staging& staging,
     const std::uint32_t image) {
+
     executor.begin();
-    executor.barrier();
 
     if (const lsfg::ErrorCode code = executor.record_download(image, staging, 0);
         !lsfg::succeeded(code)) {
@@ -329,7 +362,9 @@ bool dispatch_whole_chain(
     lsfg::backend::Executor& executor,
     lsfg::backend::Staging& staging,
     const lsfg::cache::Loaded& cache,
-    const lsfg::backend::Plan& plan) {
+    const lsfg::backend::Plan& plan,
+    const bool verbose,
+    Row& row) {
     lsfg::backend::Schedule order;
     if (const lsfg::ErrorCode code = lsfg::backend::schedule(cache.graph, order);
         !lsfg::succeeded(code)) {
@@ -343,15 +378,18 @@ bool dispatch_whole_chain(
         return false;
     }
 
-    std::printf("\nchain      %u dispatches: %u in the prepass", order.dispatches(), order.stages[0].count);
-    for (std::uint32_t stage = 1; stage < order.stages.size(); ++stage) {
-        std::printf(", %u for generated frame %u", order.stages[stage].count, stage - 1U);
+    if (verbose) {
+        std::printf("\nchain      %u dispatches: %u in the prepass",
+            order.dispatches(), order.stages[0].count);
+        for (std::uint32_t stage = 1; stage < order.stages.size(); ++stage) {
+            std::printf(", %u for generated frame %u", order.stages[stage].count, stage - 1U);
+        }
+        std::printf(
+            "\nreal frames repeat every %u, after %u of warm-up\n",
+            order.cycle,
+            order.warmup_frames);
+        consoleUpdate(nullptr);
     }
-    std::printf(
-        "\nreal frames repeat every %u, after %u of warm-up\n",
-        order.cycle,
-        order.warmup_frames);
-    consoleUpdate(nullptr);
 
     if (!upload_frames(executor, staging, plan)) {
         return false;
@@ -369,61 +407,68 @@ bool dispatch_whole_chain(
         return false;
     }
 
-    std::uint64_t warming_ns = 0;
-    for (std::uint32_t frame = 0; frame < order.cycle; ++frame) {
-        std::uint64_t elapsed = 0;
-        if (!run_frame(executor, order, frame, elapsed)) {
-            return false;
-        }
-        warming_ns += elapsed;
-    }
-
     const std::array<std::uint32_t, 3> frames{order.cycle, order.cycle + 1U, 2U * order.cycle};
     std::array<Summary, 3> summaries{};
     std::array<Bar, 3> bars{};
-    std::array<std::uint64_t, 3> elapsed{};
+    std::array<FrameCost, 3> cost{};
 
     const lsfg::graph::Extent extent = plan.images[generated].extent;
     const std::uint64_t generated_bytes = image_bytes(plan.images[generated]);
 
-    for (std::size_t run = 0; run < frames.size(); ++run) {
-        if (!run_frame(executor, order, frames[run], elapsed[run])) {
+    std::uint64_t warming_ns = 0;
+    std::size_t next = 0;
+
+    for (std::uint32_t frame = 0; frame <= frames.back(); ++frame) {
+        FrameCost this_frame;
+        if (!run_frame(executor, order, frame, this_frame)) {
             return false;
         }
+        if (frame < order.cycle) {
+            warming_ns += this_frame.elapsed_ns;
+        }
+        if (next >= frames.size() || frame != frames[next]) {
+            continue;
+        }
+
+        cost[next] = this_frame;
         if (!read_image(executor, staging, generated)) {
             return false;
         }
 
         const std::span<const std::uint8_t> pixels = staging.bytes().subspan(0, generated_bytes);
-        summaries[run] = summarise(pixels);
-        bars[run] = find_bar(pixels, extent);
+        summaries[next] = summarise(pixels);
+        bars[next] = find_bar(pixels, extent);
+        ++next;
     }
 
     std::vector<std::uint64_t> per_stage(order.stages.size(), 0);
-    if (!run_frame_by_stage(executor, order, frames[0], per_stage)) {
+    if (verbose && !run_frame_by_stage(executor, order, frames[0], per_stage)) {
         return false;
     }
 
-    std::printf("\nframe  mean  min  max  nonzero  crc         bar\n");
-    for (std::size_t run = 0; run < frames.size(); ++run) {
-        std::printf(
-            "%5u  %4u  %3u  %3u  %5llu%%  %08lx  ",
-            frames[run],
-            summaries[run].mean,
-            summaries[run].minimum,
-            summaries[run].maximum,
-            static_cast<unsigned long long>(
-                (summaries[run].written * 100ULL) / std::max<std::uint64_t>(generated_bytes, 1)),
-            static_cast<unsigned long>(summaries[run].crc));
-        print_bar(bars[run]);
+    if (verbose) {
+        std::printf("\nframe  mean  min  max  nonzero  crc         bar\n");
+        for (std::size_t run = 0; run < frames.size(); ++run) {
+            std::printf(
+                "%5u  %4u  %3u  %3u  %5llu%%  %08lx  ",
+                frames[run],
+                summaries[run].mean,
+                summaries[run].minimum,
+                summaries[run].maximum,
+                static_cast<unsigned long long>(
+                    (summaries[run].written * 100ULL)
+                    / std::max<std::uint64_t>(generated_bytes, 1)),
+                static_cast<unsigned long>(summaries[run].crc));
+            print_bar(bars[run]);
+            std::printf("\n");
+        }
+
+        std::printf("%-41s", "real");
+        print_bar(real[0]);
+        std::printf(" and");
+        print_bar(real[1]);
         std::printf("\n");
     }
-
-    std::printf("%-41s", "real");
-    print_bar(real[0]);
-    std::printf(" and");
-    print_bar(real[1]);
-    std::printf("\n");
 
     const float lower = std::min(real[0].centre, real[1].centre);
     const float upper = std::max(real[0].centre, real[1].centre);
@@ -435,8 +480,31 @@ bool dispatch_whole_chain(
     }
 
     const bool wrote_anything = summaries[0].written != 0;
-    const bool motion_is_visible = summaries[0].crc != summaries[1].crc;
+    const bool variants_rotate = summaries[0].crc != summaries[1].crc;
     const bool repeatable = summaries[0].crc == summaries[2].crc;
+
+    // The first thing that went wrong is the one worth carrying forward.
+    row.failed = nullptr;
+    if (!wrote_anything) {
+        row.failed = "LEFT ZERO";
+    } else if (!interpolated) {
+        row.failed = "BAR OUTSIDE";
+    } else if (!variants_rotate) {
+        row.failed = "NO ROTATION";
+    } else if (!repeatable) {
+        row.failed = "NOT REPEATABLE";
+    }
+
+    row.frame_ns = std::min({cost[0].elapsed_ns, cost[1].elapsed_ns, cost[2].elapsed_ns});
+    row.measured = true;
+
+    const auto us = [](const std::uint64_t ns) {
+        return static_cast<unsigned long long>(ns / 1000ULL);
+    };
+
+    if (!verbose) {
+        return row.failed == nullptr;
+    }
 
     std::printf(
         "\n%s\n",
@@ -447,24 +515,23 @@ bool dispatch_whole_chain(
                      : "THE BAR IS NOT BETWEEN THE TWO REAL FRAMES");
     std::printf(
         "%s\n",
-        motion_is_visible ? "consecutive frames give different results"
-                          : "CONSECUTIVE FRAMES GAVE THE SAME RESULT");
+        variants_rotate ? "consecutive frames interpolate opposite ways"
+                        : "CONSECUTIVE FRAMES GAVE THE SAME RESULT");
     std::printf(
         "%s\n",
         repeatable ? "a cycle apart gives the same result" : "A CYCLE APART GAVE TWO RESULTS");
 
-    const auto us = [](const std::uint64_t ns) {
-        return static_cast<unsigned long long>(ns / 1000ULL);
-    };
-
     std::printf(
         "\nwhole chain %llu us, %llu us, %llu us, against 16667 us at 60 Hz\n",
-        us(elapsed[0]),
-        us(elapsed[1]),
-        us(elapsed[2]));
+        us(cost[0].elapsed_ns),
+        us(cost[1].elapsed_ns),
+        us(cost[2].elapsed_ns));
+    std::printf(
+        "  recording %llu us of that, %u dispatches and %u barriers\n",
+        us(cost[0].recording_ns),
+        order.dispatches(),
+        cost[0].barriers);
     std::printf("warm-up     %llu us over %u frames\n", us(warming_ns), order.cycle);
-    // Each of these is drained on its own, so they include a queue bubble the
-    // whole-chain figure above does not.
     std::printf("  prepass   %llu us over %u dispatches\n", us(per_stage[0]), order.stages[0].count);
     for (std::uint32_t stage = 1; stage < order.stages.size(); ++stage) {
         std::printf(
@@ -474,29 +541,34 @@ bool dispatch_whole_chain(
             order.stages[stage].count);
     }
 
-    return wrote_anything && interpolated && motion_is_visible && repeatable;
+    return row.failed == nullptr;
 }
 
-bool run() {
+// Everything one cache costs.
+bool measure_cache(const std::string& directory, const bool verbose, Row& row) {
     lsfg::cache::Loaded cache;
     lsfg::backend::Plan plan;
-    std::string directory;
 
-    if (!find_cache(cache, plan, directory)) {
-        report_failure(lsfg::ErrorCode::cache_missing, "finding a cache");
-        std::printf("Run lsfg-prepare.nro against your own Lossless.dll first.\n");
+    if (!load_cache(directory, cache, plan)) {
         return false;
     }
 
-    std::printf("cache      %s\n", directory.c_str());
-    std::printf(
-        "%zu modules, %zu dispatches, %u descriptor sets at %ux%u\n\n",
-        cache.passes.size(),
-        plan.dispatches.size(),
-        plan.descriptor_sets,
-        plan.output.width,
-        plan.output.height);
-    consoleUpdate(nullptr);
+    row.config = cache.graph.config;
+    row.flow = lsfg::graph::flow_extent(row.config, plan.output);
+    row.images = static_cast<std::uint32_t>(plan.images.size());
+    row.memory_kib = plan.owned_image_bytes / 1024U;
+
+    if (verbose) {
+        std::printf("cache      %s\n", directory.c_str());
+        std::printf(
+            "%zu modules, %zu dispatches, %u descriptor sets at %ux%u\n\n",
+            cache.passes.size(),
+            plan.dispatches.size(),
+            plan.descriptor_sets,
+            plan.output.width,
+            plan.output.height);
+        consoleUpdate(nullptr);
+    }
 
     const std::uint64_t started = armGetSystemTick();
 
@@ -532,12 +604,14 @@ bool run() {
 
     const std::uint64_t allocated = armGetSystemTick();
 
-    report_allocation(plan, resources.allocation());
-    std::printf(
-        "\ndevice %llu ms, allocation %llu ms\n",
-        static_cast<unsigned long long>(armTicksToNs(device_ready - started) / 1'000'000ULL),
-        static_cast<unsigned long long>(armTicksToNs(allocated - device_ready) / 1'000'000ULL));
-    consoleUpdate(nullptr);
+    if (verbose) {
+        report_allocation(plan, resources.allocation());
+        std::printf(
+            "\ndevice %llu ms, allocation %llu ms\n",
+            static_cast<unsigned long long>(armTicksToNs(device_ready - started) / 1'000'000ULL),
+            static_cast<unsigned long long>(armTicksToNs(allocated - device_ready) / 1'000'000ULL));
+        consoleUpdate(nullptr);
+    }
 
     message_log.push(
         armGetSystemTick(), lsfg::LogLevel::info, lsfg::ErrorCode::ok, "chain allocated");
@@ -559,7 +633,7 @@ bool run() {
         return false;
     }
 
-    if (!dispatch_whole_chain(executor, staging, cache, plan)) {
+    if (!dispatch_whole_chain(executor, staging, cache, plan, verbose, row)) {
         if (!device.last_error().empty()) {
             std::printf("%s\n", device.last_error().data());
         }
@@ -569,6 +643,97 @@ bool run() {
     message_log.push(
         armGetSystemTick(), lsfg::LogLevel::info, lsfg::ErrorCode::ok, "whole chain dispatched");
     return true;
+}
+
+// Runs every cache on the card.
+bool run() {
+    constexpr std::uint64_t budget_us = 16667;
+
+    const std::vector<std::string> directories = cache_directories();
+    if (directories.empty()) {
+        report_failure(lsfg::ErrorCode::cache_missing, "finding a cache");
+        std::printf("Run lsfg-prepare.nro against your own Lossless.dll first.\n");
+        return false;
+    }
+
+    std::printf("%zu caches to measure at %ux%u\n",
+        directories.size(), handheld_extent.width, handheld_extent.height);
+    consoleUpdate(nullptr);
+
+    std::vector<Row> rows;
+    rows.reserve(directories.size());
+
+    for (std::size_t index = 0; index < directories.size(); ++index) {
+        Row row;
+        // Only the first one reports in full, so the detail that found the last
+        // round of bugs is still there to read.
+        static_cast<void>(measure_cache(directories[index], index == 0, row));
+        if (row.measured) {
+            rows.push_back(row);
+        }
+    }
+
+    if (rows.empty()) {
+        report_failure(lsfg::ErrorCode::cache_missing, "measuring any cache");
+        return false;
+    }
+
+    std::sort(rows.begin(), rows.end(), [](const Row& left, const Row& right) {
+        return left.frame_ns < right.frame_ns;
+    });
+
+    std::printf("\nconfig           flow ext   images     KiB   chain us  of 60Hz\n");
+
+    const Row* best = nullptr;
+    for (const Row& row : rows) {
+        std::array<char, 24> name{};
+        name_config(row.config, name);
+
+        std::array<char, 16> extent{};
+        std::snprintf(extent.data(), extent.size(), "%ux%u", row.flow.width, row.flow.height);
+
+        const auto frame_us = static_cast<unsigned long long>(row.frame_ns / 1000ULL);
+
+        std::printf(
+            "%-15s %9s %8u %7llu %10llu  %4llu.%02llux",
+            name.data(),
+            extent.data(),
+            row.images,
+            static_cast<unsigned long long>(row.memory_kib),
+            frame_us,
+            frame_us / budget_us,
+            ((frame_us * 100ULL) / budget_us) % 100ULL);
+
+        if (row.failed != nullptr) {
+            std::printf("  %s", row.failed);
+        } else if (frame_us <= budget_us) {
+            std::printf("  UNDER");
+            // Sorted fastest first, so the last one to fit is the most
+            // expensive one that does, which is the one worth running.
+            best = &row;
+        }
+        std::printf("\n");
+        consoleUpdate(nullptr);
+    }
+
+    if (best != nullptr) {
+        std::array<char, 24> name{};
+        name_config(best->config, name);
+        std::printf(
+            "\nbest configuration inside the budget: %s at %llu us\n",
+            name.data(),
+            static_cast<unsigned long long>(best->frame_ns / 1000ULL));
+        return true;
+    }
+
+    std::array<char, 24> name{};
+    name_config(rows.front().config, name);
+    std::printf(
+        "\nnothing reached %llu us; %s came closest at %llu us\n",
+        static_cast<unsigned long long>(budget_us),
+        name.data(),
+        static_cast<unsigned long long>(rows.front().frame_ns / 1000ULL));
+    return false;
 }
 
 } // namespace
