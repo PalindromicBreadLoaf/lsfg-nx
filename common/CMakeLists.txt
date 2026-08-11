@@ -33,6 +33,22 @@ add_library(lsfg::image_graph ALIAS lsfg_image_graph)
 target_include_directories(lsfg_image_graph PUBLIC image-graph/include)
 target_link_libraries(lsfg_image_graph PUBLIC lsfg::error lsfg::shader_set lsfg_project_options)
 
+add_library(lsfg_image_file STATIC image-file/src/image_file.cpp)
+add_library(lsfg::image_file ALIAS lsfg_image_file)
+target_include_directories(lsfg_image_file PUBLIC image-file/include)
+target_link_libraries(
+    lsfg_image_file
+    PUBLIC lsfg::cache_format lsfg::error lsfg::image_graph lsfg_project_options
+)
+
+add_library(lsfg_image_compare STATIC image-compare/src/image_compare.cpp)
+add_library(lsfg::image_compare ALIAS lsfg_image_compare)
+target_include_directories(lsfg_image_compare PUBLIC image-compare/include)
+target_link_libraries(
+    lsfg_image_compare
+    PUBLIC lsfg::error lsfg::image_file lsfg::image_graph lsfg_project_options
+)
+
 add_library(lsfg_translate STATIC translate/src/translate.cpp)
 add_library(lsfg::translate ALIAS lsfg_translate)
 target_include_directories(lsfg_translate PUBLIC translate/include)

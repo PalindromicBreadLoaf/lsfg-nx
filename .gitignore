@@ -25,9 +25,11 @@ Lossless.dll
 **/cache/
 /dumps/
 /captures/
+/reference/
 *.spv
+*.lsimg
+*.dds
 
 # Diagnostics
 *.local.ini
 *.diagnostic.json
-
