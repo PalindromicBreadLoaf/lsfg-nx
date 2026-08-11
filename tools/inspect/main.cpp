@@ -12,6 +12,8 @@
 #include <lsfg/common/cache_format.hpp>
 #include <lsfg/common/cache_store.hpp>
 #include <lsfg/common/dksh.hpp>
+#include <lsfg/common/image_compare.hpp>
+#include <lsfg/common/image_file.hpp>
 #include <lsfg/common/image_graph.hpp>
 #include <lsfg/common/pe_resources.hpp>
 #include <lsfg/common/prepare.hpp>
@@ -22,6 +24,7 @@
 #include <lsfg/common/version.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -42,6 +45,9 @@ struct Options {
     std::filesystem::path glsl_directory;
     std::filesystem::path cache_directory;
     std::filesystem::path load_directory;
+    std::filesystem::path frames_directory;
+    std::array<std::filesystem::path, 2> compare_directories;
+    std::array<std::filesystem::path, 2> import_paths;
     lsfg::graph::Extent extent{.width = 1280, .height = 720};
     bool list_all{};
     bool translate{};
@@ -72,6 +78,14 @@ Options parse_arguments(const std::span<const std::string_view> arguments) {
             options.translate = true;
         } else if (argument == "--load" && index + 1U < arguments.size()) {
             options.load_directory = arguments[++index];
+        } else if (argument == "--frames" && index + 1U < arguments.size()) {
+            options.frames_directory = arguments[++index];
+        } else if (argument == "--compare" && index + 2U < arguments.size()) {
+            options.compare_directories[0] = arguments[++index];
+            options.compare_directories[1] = arguments[++index];
+        } else if (argument == "--import" && index + 2U < arguments.size()) {
+            options.import_paths[0] = arguments[++index];
+            options.import_paths[1] = arguments[++index];
         } else if (argument == "--extent" && index + 1U < arguments.size()) {
             const std::string_view extent = arguments[++index];
             const std::size_t separator = extent.find('x');
@@ -94,7 +108,9 @@ Options parse_arguments(const std::span<const std::string_view> arguments) {
         }
     }
 
-    options.valid = !options.dll.empty() || !options.load_directory.empty();
+    options.valid = !options.dll.empty() || !options.load_directory.empty()
+        || !options.frames_directory.empty() || !options.compare_directories[0].empty()
+        || !options.import_paths[0].empty();
     return options;
 }
 
@@ -673,6 +689,214 @@ int report(const Options& options) {
     return EXIT_SUCCESS;
 }
 
+bool write_bytes(const std::filesystem::path& path, const std::span<const std::uint8_t> bytes) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        return false;
+    }
+    out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    return static_cast<bool>(out);
+}
+
+// The deterministic real frames both sides of a comparison run on, written
+// once as this project's own dump and once as DDS.
+int write_frames(const Options& options) {
+    std::error_code failed;
+    std::filesystem::create_directories(options.frames_directory, failed);
+    if (failed) {
+        std::cerr << "could not create " << options.frames_directory.string() << '\n';
+        return EXIT_FAILURE;
+    }
+
+    const auto bytes = static_cast<std::size_t>(
+        lsfg::image::pixel_bytes(options.extent, lsfg::graph::Format::rgba8));
+
+    for (std::uint32_t frame = 0; frame < lsfg::graph::history_image_count; ++frame) {
+        std::vector<std::uint8_t> pixels(bytes);
+        if (!lsfg::succeeded(lsfg::image::draw_test_frame(pixels, options.extent, frame))) {
+            std::cerr << "the extent is too small to draw the test pattern\n";
+            return EXIT_FAILURE;
+        }
+
+        const std::string label = "real-" + std::to_string(frame);
+        const lsfg::image::DumpHeader header = lsfg::image::describe(
+            lsfg::image::Description{
+                .extent = options.extent,
+                .format = lsfg::graph::Format::rgba8,
+                .role = lsfg::graph::ImageRole::history,
+                .image = frame,
+                .label = label,
+            },
+            pixels);
+
+        std::vector<std::uint8_t> encoded;
+        if (!lsfg::succeeded(lsfg::image::encode(header, pixels, encoded))
+            || !write_bytes(options.frames_directory / (label + ".lsimg"), encoded)) {
+            std::cerr << "could not write " << label << ".lsimg\n";
+            return EXIT_FAILURE;
+        }
+
+        std::vector<std::uint8_t> dds;
+        if (!lsfg::succeeded(lsfg::image::encode_dds(header, pixels, dds))
+            || !write_bytes(options.frames_directory / (std::to_string(frame) + ".dds"), dds)) {
+            std::cerr << "could not write " << frame << ".dds\n";
+            return EXIT_FAILURE;
+        }
+
+        const lsfg::image::Bar bar = lsfg::image::find_bar(pixels, options.extent);
+        std::cout << label << "  " << options.extent.width << 'x' << options.extent.height
+                  << "  bar at " << std::fixed << std::setprecision(1) << bar.centre << '\n';
+    }
+
+    std::cout << "\nwritten to " << options.frames_directory.string()
+              << ": .lsimg for --compare, .dds for the reference implementation\n";
+    return EXIT_SUCCESS;
+}
+
+// One DDS from elsewhere turned into a dump this tool can compare.
+int import_dds(const Options& options) {
+    const std::filesystem::path& source = options.import_paths[0];
+    const std::filesystem::path& destination = options.import_paths[1];
+
+    const std::vector<std::uint8_t> bytes = read_file(source);
+    if (bytes.empty()) {
+        std::cerr << "could not read " << source.string() << '\n';
+        return EXIT_FAILURE;
+    }
+
+    const std::string label = destination.stem().string();
+    lsfg::image::Dump dump;
+    if (const lsfg::ErrorCode code = lsfg::image::decode_dds(
+            bytes, lsfg::image::Description{.label = label}, dump);
+        !lsfg::succeeded(code)) {
+        std::cerr << source.string() << " is not an uncompressed 32 bit RGBA DDS: "
+                  << lsfg::error_name(code) << '\n';
+        return EXIT_FAILURE;
+    }
+
+    std::error_code failed;
+    if (destination.has_parent_path()) {
+        std::filesystem::create_directories(destination.parent_path(), failed);
+    }
+
+    std::vector<std::uint8_t> encoded;
+    if (!lsfg::succeeded(lsfg::image::encode(dump.header, dump.pixels, encoded))
+        || !write_bytes(destination, encoded)) {
+        std::cerr << "could not write " << destination.string() << '\n';
+        return EXIT_FAILURE;
+    }
+
+    const lsfg::image::Bar bar = lsfg::image::find_bar(
+        dump.pixels,
+        lsfg::graph::Extent{.width = dump.header.width, .height = dump.header.height});
+
+    std::cout << destination.string() << "  " << dump.header.width << 'x' << dump.header.height
+              << "  bar ";
+    if (bar.found) {
+        std::cout << std::fixed << std::setprecision(1) << bar.centre << '\n';
+    } else {
+        std::cout << "not found\n";
+    }
+    return EXIT_SUCCESS;
+}
+
+std::vector<std::uint8_t> read_dump_file(const std::filesystem::path& path, lsfg::ErrorCode& code) {
+    const std::vector<std::uint8_t> bytes = read_file(path);
+    code = bytes.empty() ? lsfg::ErrorCode::io_error : lsfg::ErrorCode::ok;
+    return bytes;
+}
+
+int compare_dumps(const Options& options) {
+    const std::filesystem::path& reference_root = options.compare_directories[0];
+    const std::filesystem::path& measured_root = options.compare_directories[1];
+
+    std::vector<std::filesystem::path> names;
+    std::error_code failed;
+    for (const std::filesystem::directory_entry& entry :
+            std::filesystem::directory_iterator(reference_root, failed)) {
+        if (entry.is_regular_file() && entry.path().extension() == ".lsimg") {
+            names.push_back(entry.path().filename());
+        }
+    }
+    if (failed) {
+        std::cerr << "could not read " << reference_root.string() << '\n';
+        return EXIT_FAILURE;
+    }
+    if (names.empty()) {
+        std::cerr << "no .lsimg files in " << reference_root.string() << '\n';
+        return EXIT_FAILURE;
+    }
+    std::ranges::sort(names);
+
+    std::cout << reference_root.string() << "\nagainst " << measured_root.string() << "\n\n"
+              << std::left << std::setw(20) << "image" << std::right << "  " << std::setw(9)
+              << "extent" << "  " << std::left << std::setw(7) << "format" << std::right
+              << std::setw(8) << "max" << "  " << std::setw(8) << "mean" << "  " << std::setw(8)
+              << "rmse" << "  outliers\n";
+
+    bool all_matched = true;
+    for (const std::filesystem::path& name : names) {
+        std::cout << std::left << std::setw(20) << name.stem().string() << std::right << "  ";
+
+        lsfg::ErrorCode code{};
+        const std::vector<std::uint8_t> left = read_dump_file(reference_root / name, code);
+        const std::vector<std::uint8_t> right = read_dump_file(measured_root / name, code);
+        if (left.empty() || right.empty()) {
+            std::cout << "MISSING on " << (right.empty() ? "the measured" : "the reference")
+                      << " side\n";
+            all_matched = false;
+            continue;
+        }
+
+        lsfg::image::Dump reference;
+        lsfg::image::Dump measured;
+        if (!lsfg::succeeded(lsfg::image::decode(left, reference))
+            || !lsfg::succeeded(lsfg::image::decode(right, measured))) {
+            std::cout << "UNREADABLE\n";
+            all_matched = false;
+            continue;
+        }
+
+        const auto format = static_cast<lsfg::graph::Format>(reference.header.format);
+        const lsfg::image::Tolerance tolerance = lsfg::image::default_tolerance(format);
+
+        lsfg::image::Difference difference;
+        if (!lsfg::succeeded(
+                lsfg::image::compare(reference, measured, tolerance, difference))) {
+            std::cout << "NOT COMPARABLE, the two are different shapes\n";
+            all_matched = false;
+            continue;
+        }
+
+        const std::string extent = std::to_string(reference.header.width) + "x"
+            + std::to_string(reference.header.height);
+        const std::string_view format_name = lsfg::graph::format_name(format);
+
+        std::cout << std::setw(9) << extent << "  " << std::left << std::setw(7) << format_name
+                  << std::right << std::scientific << std::setprecision(2) << difference.max_abs
+                  << "  " << difference.mean_abs << "  " << difference.rmse << "  " << std::fixed
+                  << std::setprecision(4) << (difference.outlier_fraction() * 100.0) << "%";
+
+        if (difference.within(tolerance)) {
+            std::cout << "  within\n";
+            continue;
+        }
+
+        all_matched = false;
+        std::cout << "  OUTSIDE";
+        if (difference.non_finite != 0) {
+            std::cout << ", " << difference.non_finite << " channels not finite";
+        }
+        std::cout << ", worst at " << difference.worst_x << ',' << difference.worst_y
+                  << " channel " << difference.worst_channel << '\n';
+    }
+
+    std::cout << '\n'
+              << (all_matched ? "every image is within tolerance\n"
+                              : "AT LEAST ONE IMAGE IS OUTSIDE TOLERANCE\n");
+    return all_matched ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
 } // namespace
 
 int main(const int argc, const char* const* const argv) {
@@ -690,8 +914,23 @@ int main(const int argc, const char* const* const argv) {
                      "                    [--dump <directory>] [--glsl <directory>]\n"
                      "                    [--cache <directory>]\n"
                      "       lsfg-inspect --load <cache directory> [--performance]\n"
-                     "                    [--extent <width>x<height>]\n";
+                     "                    [--extent <width>x<height>]\n"
+                     "       lsfg-inspect --frames <directory> [--extent <width>x<height>]\n"
+                     "       lsfg-inspect --compare <reference directory> <measured directory>\n"
+                     "       lsfg-inspect --import <file.dds> <file.lsimg>\n";
         return EXIT_FAILURE;
+    }
+
+    if (!options.compare_directories[0].empty()) {
+        return compare_dumps(options);
+    }
+
+    if (!options.import_paths[0].empty()) {
+        return import_dds(options);
+    }
+
+    if (!options.frames_directory.empty()) {
+        return write_frames(options);
     }
 
     if (!options.load_directory.empty()) {

@@ -7,6 +7,8 @@ target_link_libraries(
         lsfg::cache_store
         lsfg::dksh
         lsfg::hash
+        lsfg::image_compare
+        lsfg::image_file
         lsfg::image_graph
         lsfg::pe
         lsfg::prepare
