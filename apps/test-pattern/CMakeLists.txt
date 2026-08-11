@@ -5,6 +5,7 @@ target_link_libraries(
         lsfg::backend
         lsfg::cache_format
         lsfg::cache_store
+        lsfg::image_file
         lsfg::image_graph
         lsfg::logging
         lsfg_project_options

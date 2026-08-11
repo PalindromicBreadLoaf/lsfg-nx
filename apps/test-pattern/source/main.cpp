@@ -7,12 +7,14 @@
 #include <lsfg/backend/schedule.hpp>
 #include <lsfg/common/cache_format.hpp>
 #include <lsfg/common/cache_store.hpp>
+#include <lsfg/common/image_file.hpp>
 #include <lsfg/common/image_graph.hpp>
 #include <lsfg/common/ring_log.hpp>
 
 #include <switch.h>
 
 #include <dirent.h>
+#include <sys/stat.h>
 
 #include <algorithm>
 #include <array>
@@ -25,6 +27,7 @@
 namespace {
 
 constexpr const char* cache_root = "sdmc:/switch/lsfg-nx/cache";
+constexpr const char* dump_root = "sdmc:/switch/lsfg-nx/dumps";
 
 // Handheld first to limit the pixel workload before anything is measured.
 constexpr lsfg::graph::Extent handheld_extent{.width = 1280, .height = 720};
@@ -68,6 +71,53 @@ void name_config(const lsfg::graph::Config& config, const std::span<char> out) {
         config.flow_numerator,
         config.flow_denominator);
 }
+
+// The same name with nothing a FAT volume dislikes in it.
+std::string dump_directory_of(const lsfg::graph::Config& config) {
+    return std::string{dump_root} + "/" + (config.performance ? "performance" : "quality") + "-"
+        + std::to_string(config.flow_numerator) + "-"
+        + std::to_string(config.flow_denominator);
+}
+
+// Writes the images a comparison runs on, so what the console produced can be
+// put beside what another implementation produces from the same inputs.
+class Dumper {
+public:
+    void open(const lsfg::graph::Config& config) {
+        mkdir(dump_root, 0777);
+        directory_ = dump_directory_of(config);
+        mkdir(directory_.c_str(), 0777);
+    }
+
+    [[nodiscard]] bool write(
+        const std::span<const std::uint8_t> pixels,
+        const lsfg::image::Description& description) {
+        const lsfg::image::DumpHeader header = lsfg::image::describe(description, pixels);
+
+        std::vector<std::uint8_t> encoded;
+        if (!lsfg::succeeded(lsfg::image::encode(header, pixels, encoded))) {
+            return false;
+        }
+
+        const std::string path
+            = directory_ + "/" + std::string{description.label} + ".lsimg";
+        std::FILE* const file = std::fopen(path.c_str(), "wb");
+        if (file == nullptr) {
+            return false;
+        }
+
+        const std::size_t written = std::fwrite(encoded.data(), 1, encoded.size(), file);
+        std::fclose(file);
+        return written == encoded.size();
+    }
+
+    [[nodiscard]] const std::string& directory() const noexcept {
+        return directory_;
+    }
+
+private:
+    std::string directory_;
+};
 
 bool load_cache(
     const std::string& directory,
@@ -124,33 +174,6 @@ void report_allocation(const lsfg::backend::Plan& plan, const lsfg::backend::All
     std::printf("total      %llu KiB\n", kib(taken.total()));
 }
 
-// A checkerboard with a gradient over it and a bar that moves between the two
-// frames.
-void draw_frame(
-    const std::span<std::uint8_t> pixels,
-    const lsfg::graph::Extent extent,
-    const std::uint32_t frame) {
-    constexpr std::uint32_t bar_width = 96;
-    const std::uint32_t bar = 160U + (frame * 48U);
-
-    for (std::uint32_t y = 0; y < extent.height; ++y) {
-        for (std::uint32_t x = 0; x < extent.width; ++x) {
-            const bool light = (((x >> 5U) + (y >> 5U)) & 1U) != 0;
-            const bool in_bar = x >= bar && x < bar + bar_width;
-
-            const std::size_t offset = (static_cast<std::size_t>(y) * extent.width + x) * 4U;
-            pixels[offset + 0] = in_bar ? 255 : static_cast<std::uint8_t>(light ? 200 : 40);
-            pixels[offset + 1] = in_bar
-                ? 255
-                : static_cast<std::uint8_t>((x * 255U) / (extent.width - 1U));
-            pixels[offset + 2] = in_bar
-                ? 255
-                : static_cast<std::uint8_t>((y * 255U) / (extent.height - 1U));
-            pixels[offset + 3] = 255;
-        }
-    }
-}
-
 struct Summary {
     std::uint32_t crc{};
     std::uint32_t written{};
@@ -199,10 +222,14 @@ bool upload_frames(
     }
 
     for (std::uint32_t frame = 0; frame < lsfg::graph::history_image_count; ++frame) {
-        draw_frame(
-            staging.bytes().subspan(frame * frame_bytes, frame_bytes),
-            plan.images[frame].extent,
-            frame);
+        if (const lsfg::ErrorCode code = lsfg::image::draw_test_frame(
+                staging.bytes().subspan(frame * frame_bytes, frame_bytes),
+                plan.images[frame].extent,
+                frame);
+            !lsfg::succeeded(code)) {
+            report_failure(code, "drawing a real frame");
+            return false;
+        }
     }
 
     executor.begin();
@@ -222,35 +249,7 @@ bool upload_frames(
     return true;
 }
 
-struct Bar {
-    bool found{};
-    float centre{};
-};
-
-Bar find_bar(const std::span<const std::uint8_t> pixels, const lsfg::graph::Extent extent) {
-    constexpr std::uint32_t background = 210;
-
-    double weight_total = 0;
-    double column_total = 0;
-    for (std::uint32_t y = 0; y < extent.height; ++y) {
-        for (std::uint32_t x = 0; x < extent.width; ++x) {
-            const std::size_t offset = (static_cast<std::size_t>(y) * extent.width + x) * 4U;
-            if (pixels[offset] <= background) {
-                continue;
-            }
-            const double weight = pixels[offset] - background;
-            weight_total += weight;
-            column_total += weight * x;
-        }
-    }
-
-    if (weight_total == 0) {
-        return Bar{};
-    }
-    return Bar{.found = true, .centre = static_cast<float>(column_total / weight_total)};
-}
-
-void print_bar(const Bar& bar) {
+void print_bar(const lsfg::image::Bar& bar) {
     if (!bar.found) {
         std::printf("   none");
         return;
@@ -364,6 +363,7 @@ bool dispatch_whole_chain(
     const lsfg::cache::Loaded& cache,
     const lsfg::backend::Plan& plan,
     const bool verbose,
+    Dumper* const dumper,
     Row& row) {
     lsfg::backend::Schedule order;
     if (const lsfg::ErrorCode code = lsfg::backend::schedule(cache.graph, order);
@@ -396,9 +396,9 @@ bool dispatch_whole_chain(
     }
 
     const std::uint64_t frame_bytes = image_bytes(plan.images[0]);
-    std::array<Bar, lsfg::graph::history_image_count> real{};
+    std::array<lsfg::image::Bar, lsfg::graph::history_image_count> real{};
     for (std::uint32_t frame = 0; frame < real.size(); ++frame) {
-        real[frame] = find_bar(
+        real[frame] = lsfg::image::find_bar(
             staging.bytes().subspan(frame * frame_bytes, frame_bytes),
             plan.images[frame].extent);
     }
@@ -407,9 +407,29 @@ bool dispatch_whole_chain(
         return false;
     }
 
+    // The readback below lands at the front of the staging buffer, so the real
+    // frames have to leave it before the first generated frame arrives.
+    if (dumper != nullptr) {
+        for (std::uint32_t frame = 0; frame < lsfg::graph::history_image_count; ++frame) {
+            const std::string label = "real-" + std::to_string(frame);
+            if (!dumper->write(
+                    staging.bytes().subspan(frame * frame_bytes, frame_bytes),
+                    lsfg::image::Description{
+                        .extent = plan.images[frame].extent,
+                        .format = plan.images[frame].format,
+                        .role = plan.images[frame].role,
+                        .image = frame,
+                        .label = label,
+                    })) {
+                report_failure(lsfg::ErrorCode::io_error, "writing a real frame out");
+                return false;
+            }
+        }
+    }
+
     const std::array<std::uint32_t, 3> frames{order.cycle, order.cycle + 1U, 2U * order.cycle};
     std::array<Summary, 3> summaries{};
-    std::array<Bar, 3> bars{};
+    std::array<lsfg::image::Bar, 3> bars{};
     std::array<FrameCost, 3> cost{};
 
     const lsfg::graph::Extent extent = plan.images[generated].extent;
@@ -437,7 +457,24 @@ bool dispatch_whole_chain(
 
         const std::span<const std::uint8_t> pixels = staging.bytes().subspan(0, generated_bytes);
         summaries[next] = summarise(pixels);
-        bars[next] = find_bar(pixels, extent);
+        bars[next] = lsfg::image::find_bar(pixels, extent);
+
+        if (dumper != nullptr) {
+            const std::string label = "generated-" + std::to_string(frame);
+            if (!dumper->write(
+                    pixels,
+                    lsfg::image::Description{
+                        .extent = extent,
+                        .format = plan.images[generated].format,
+                        .role = plan.images[generated].role,
+                        .image = generated,
+                        .frame = frame,
+                        .label = label,
+                    })) {
+                report_failure(lsfg::ErrorCode::io_error, "writing a generated frame out");
+                return false;
+            }
+        }
         ++next;
     }
 
@@ -545,7 +582,11 @@ bool dispatch_whole_chain(
 }
 
 // Everything one cache costs.
-bool measure_cache(const std::string& directory, const bool verbose, Row& row) {
+bool measure_cache(
+    const std::string& directory,
+    const bool verbose,
+    const bool dumping,
+    Row& row) {
     lsfg::cache::Loaded cache;
     lsfg::backend::Plan plan;
 
@@ -633,7 +674,13 @@ bool measure_cache(const std::string& directory, const bool verbose, Row& row) {
         return false;
     }
 
-    if (!dispatch_whole_chain(executor, staging, cache, plan, verbose, row)) {
+    Dumper dumper;
+    if (dumping) {
+        dumper.open(cache.graph.config);
+    }
+
+    if (!dispatch_whole_chain(
+            executor, staging, cache, plan, verbose, dumping ? &dumper : nullptr, row)) {
         if (!device.last_error().empty()) {
             std::printf("%s\n", device.last_error().data());
         }
@@ -646,7 +693,7 @@ bool measure_cache(const std::string& directory, const bool verbose, Row& row) {
 }
 
 // Runs every cache on the card.
-bool run() {
+bool run(const bool dumping) {
     constexpr std::uint64_t budget_us = 16667;
 
     const std::vector<std::string> directories = cache_directories();
@@ -658,6 +705,9 @@ bool run() {
 
     std::printf("%zu caches to measure at %ux%u\n",
         directories.size(), handheld_extent.width, handheld_extent.height);
+    if (dumping) {
+        std::printf("writing frames to %s, which will take a while per cache\n", dump_root);
+    }
     consoleUpdate(nullptr);
 
     std::vector<Row> rows;
@@ -667,7 +717,7 @@ bool run() {
         Row row;
         // Only the first one reports in full, so the detail that found the last
         // round of bugs is still there to read.
-        static_cast<void>(measure_cache(directories[index], index == 0, row));
+        static_cast<void>(measure_cache(directories[index], index == 0, dumping, row));
         if (row.measured) {
             rows.push_back(row);
         }
@@ -745,10 +795,15 @@ int main() {
     PadState pad{};
     padInitializeDefault(&pad);
 
+    // Writing every measured frame to the card costs minutes and tens of
+    // megabytes, so it only happens when it was asked for.
+    padUpdate(&pad);
+    const bool dumping = (padGetButtons(&pad) & HidNpadButton_R) != 0U;
+
     std::printf("LSFG-NX test pattern\n\n");
     consoleUpdate(nullptr);
 
-    static_cast<void>(run());
+    static_cast<void>(run(dumping));
 
     std::printf("\nPress + to exit.\n");
 
