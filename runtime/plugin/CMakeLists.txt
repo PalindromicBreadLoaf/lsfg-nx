@@ -16,7 +16,14 @@ endif()
 add_executable(
     lsfg_plugin
     source/crt0/_crt0.s
+    source/crt0/dynamic.cpp
+    source/deferred.cpp
+    source/deferred_thunk.s
+    source/imports.cpp
     source/main.cpp
+    source/nvn_hooks.cpp
+    source/observations.cpp
+    source/report.cpp
 )
 
 set_target_properties(
@@ -27,8 +34,16 @@ set_target_properties(
 )
 
 target_compile_definitions(lsfg_plugin PRIVATE SWITCH)
-target_include_directories(lsfg_plugin PRIVATE "${LSFG_SALTYNX_INCLUDE_DIR}")
-target_link_libraries(lsfg_plugin PRIVATE lsfg::version lsfg::protocol lsfg::logging)
+target_include_directories(lsfg_plugin SYSTEM PRIVATE "${LSFG_SALTYNX_INCLUDE_DIR}")
+target_link_libraries(
+    lsfg_plugin
+    PRIVATE
+        lsfg::instrument
+        lsfg::logging
+        lsfg::profile
+        lsfg::protocol
+        lsfg::version
+)
 
 # The loader resolves the SaltySD_* imports by walking this ELF's dynamic
 # relocations.

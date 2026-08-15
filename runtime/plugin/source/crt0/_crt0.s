@@ -52,6 +52,10 @@ entrypoint:
 
 // libnx's exit path routes here. Defining it also keeps libnx's own crt0 out
 // of the link, which would otherwise collide with the entry above.
+.global __libnx_exit
+.type   __libnx_exit, %function
+__libnx_exit:
+
 .global __nx_exit
 .type   __nx_exit, %function
 __nx_exit:
