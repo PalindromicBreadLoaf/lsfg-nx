@@ -786,6 +786,21 @@ bool run(const bool dumping) {
     return false;
 }
 
+// Writing every measured frame to the card costs minutes and tens of
+// megabytes, so only do it when necessary.
+bool wait_for_dump_request(PadState& pad) {
+    constexpr std::uint32_t window_frames = 60U;
+
+    for (std::uint32_t frame = 0; frame < window_frames; ++frame) {
+        padUpdate(&pad);
+        if ((padGetButtons(&pad) & HidNpadButton_R) != 0U) {
+            return true;
+        }
+        consoleUpdate(nullptr);
+    }
+    return false;
+}
+
 } // namespace
 
 int main() {
@@ -795,12 +810,12 @@ int main() {
     PadState pad{};
     padInitializeDefault(&pad);
 
-    // Writing every measured frame to the card costs minutes and tens of
-    // megabytes, so it only happens when it was asked for.
-    padUpdate(&pad);
-    const bool dumping = (padGetButtons(&pad) & HidNpadButton_R) != 0U;
-
     std::printf("LSFG-NX test pattern\n\n");
+    std::printf("hold R for the next second to write frames to the card\n");
+    consoleUpdate(nullptr);
+
+    const bool dumping = wait_for_dump_request(pad);
+    std::printf("%s\n\n", dumping ? "dumping frames" : "measuring");
     consoleUpdate(nullptr);
 
     static_cast<void>(run(dumping));
