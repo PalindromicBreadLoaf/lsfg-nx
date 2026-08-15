@@ -45,9 +45,12 @@ endif()
 
 add_subdirectory(common)
 add_subdirectory(runtime/backend)
+add_subdirectory(runtime/instrument)
 
 if(LSFG_BUILD_SWITCH_APPS)
     enable_language(ASM)
+
+    include(LsfgDeko3d)
 
     add_subdirectory(apps/prepare)
     add_subdirectory(apps/test-pattern)

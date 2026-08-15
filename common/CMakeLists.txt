@@ -8,6 +8,11 @@ add_library(lsfg::logging ALIAS lsfg_logging)
 target_include_directories(lsfg_logging PUBLIC logging/include)
 target_link_libraries(lsfg_logging PUBLIC lsfg::error lsfg_project_options)
 
+add_library(lsfg_profile STATIC profile/src/profile.cpp)
+add_library(lsfg::profile ALIAS lsfg_profile)
+target_include_directories(lsfg_profile PUBLIC profile/include)
+target_link_libraries(lsfg_profile PUBLIC lsfg::error lsfg_project_options)
+
 add_library(lsfg_hash STATIC hash/src/sha256.cpp)
 add_library(lsfg::hash ALIAS lsfg_hash)
 target_include_directories(lsfg_hash PUBLIC hash/include)

@@ -9,6 +9,20 @@ target_link_libraries(
 )
 add_test(NAME lsfg_common_tests COMMAND lsfg_common_tests)
 
+add_executable(lsfg_instrumentation_tests instrumentation_tests.cpp)
+target_link_libraries(
+    lsfg_instrumentation_tests
+    PRIVATE
+        lsfg::instrument
+        lsfg::profile
+        lsfg_project_options
+)
+target_compile_definitions(
+    lsfg_instrumentation_tests
+    PRIVATE "LSFG_PROFILES_DIR=\"${PROJECT_SOURCE_DIR}/profiles\""
+)
+add_test(NAME lsfg_instrumentation_tests COMMAND lsfg_instrumentation_tests)
+
 add_executable(lsfg_extraction_tests extraction_tests.cpp)
 target_link_libraries(
     lsfg_extraction_tests
