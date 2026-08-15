@@ -19,5 +19,8 @@ target_link_libraries(
 )
 
 if(NINTENDO_SWITCH)
-    target_link_libraries(lsfg_backend PUBLIC $<IF:$<CONFIG:Debug>,deko3dd,deko3d>)
+    target_link_libraries(
+        lsfg_backend
+        PUBLIC lsfg::deko3d_interop $<IF:$<CONFIG:Debug>,deko3dd,deko3d>
+    )
 endif()

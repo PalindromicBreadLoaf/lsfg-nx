@@ -63,6 +63,39 @@ private:
     std::array<char, 192> message_{};
 };
 
+struct BorrowedMemoryOptions {
+    std::uint32_t nvmap_id{};
+    std::uint32_t expected_size{};
+    bool gpu_cached{true};
+};
+
+class BorrowedMemoryBlock {
+public:
+    BorrowedMemoryBlock() noexcept = default;
+    ~BorrowedMemoryBlock();
+
+    BorrowedMemoryBlock(const BorrowedMemoryBlock&) = delete;
+    BorrowedMemoryBlock& operator=(const BorrowedMemoryBlock&) = delete;
+    BorrowedMemoryBlock(BorrowedMemoryBlock&&) = delete;
+    BorrowedMemoryBlock& operator=(BorrowedMemoryBlock&&) = delete;
+
+    [[nodiscard]] ErrorCode create(
+        const Device& device, const BorrowedMemoryOptions& options) noexcept;
+
+    void destroy() noexcept;
+
+    [[nodiscard]] DkMemBlock handle() const noexcept {
+        return memory_;
+    }
+
+    [[nodiscard]] bool valid() const noexcept {
+        return memory_ != nullptr;
+    }
+
+private:
+    DkMemBlock memory_{};
+};
+
 struct ResourceOptions {
     // With no presentation to import from, a standalone harness asks for
     // deko-owned stand ins for the frames a game would supply.

@@ -165,6 +165,43 @@ void Device::destroy() noexcept {
     }
 }
 
+BorrowedMemoryBlock::~BorrowedMemoryBlock() {
+    destroy();
+}
+
+ErrorCode BorrowedMemoryBlock::create(
+    const Device& device, const BorrowedMemoryOptions& options) noexcept {
+    if (memory_ != nullptr) {
+        return ErrorCode::invalid_state;
+    }
+    if (!device.valid() || options.nvmap_id == 0 || options.expected_size == 0) {
+        return ErrorCode::invalid_argument;
+    }
+
+    DkBorrowedMemBlockMaker maker;
+    dkBorrowedMemBlockMakerDefaults(
+        &maker, device.handle(), options.nvmap_id, options.expected_size);
+    maker.flags = DkMemBlockFlags_Image
+        | (options.gpu_cached ? DkMemBlockFlags_GpuCached : DkMemBlockFlags_GpuUncached);
+
+    memory_ = dkMemBlockCreateBorrowed(&maker);
+    if (memory_ == nullptr) {
+        return ErrorCode::backend_unavailable;
+    }
+    if (!dkMemBlockIsBorrowed(memory_) || dkMemBlockGetSize(memory_) != options.expected_size) {
+        destroy();
+        return ErrorCode::backend_unavailable;
+    }
+    return ErrorCode::ok;
+}
+
+void BorrowedMemoryBlock::destroy() noexcept {
+    if (memory_ != nullptr) {
+        dkMemBlockDestroy(memory_);
+        memory_ = nullptr;
+    }
+}
+
 Resources::~Resources() {
     destroy();
 }

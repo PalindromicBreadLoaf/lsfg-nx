@@ -1,0 +1,158 @@
+diff --git a/include/deko3d.h b/include/deko3d.h
+index 0f208dd..def3edb 100644
+--- a/include/deko3d.h
++++ b/include/deko3d.h
+@@ -198,6 +198,22 @@ DK_CONSTEXPR void dkMemBlockMakerDefaults(DkMemBlockMaker* maker, DkDevice devic
+ 	maker->storage = NULL;
+ }
+ 
++typedef struct DkBorrowedMemBlockMaker
++{
++	DkDevice device;
++	uint32_t nvMapId;
++	uint32_t expectedSize;
++	uint32_t flags;
++} DkBorrowedMemBlockMaker;
++
++DK_CONSTEXPR void dkBorrowedMemBlockMakerDefaults(DkBorrowedMemBlockMaker* maker, DkDevice device, uint32_t nvMapId, uint32_t expectedSize)
++{
++	maker->device = device;
++	maker->nvMapId = nvMapId;
++	maker->expectedSize = expectedSize;
++	maker->flags = DkMemBlockFlags_GpuCached;
++}
++
+ typedef enum DkVarOp
+ {
+ 	DkVarOp_Set = 0,
+@@ -1231,10 +1246,12 @@ DK_CONSTEXPR uint64_t dkTimestampToNs(uint64_t ts);
+ DK_CONSTEXPR uint64_t dkNsToTimestamp(uint64_t ns);
+ 
+ DkMemBlock dkMemBlockCreate(DkMemBlockMaker const* maker);
++DkMemBlock dkMemBlockCreateBorrowed(DkBorrowedMemBlockMaker const* maker);
+ void dkMemBlockDestroy(DkMemBlock obj);
+ void* dkMemBlockGetCpuAddr(DkMemBlock obj);
+ DkGpuAddr dkMemBlockGetGpuAddr(DkMemBlock obj);
+ uint32_t dkMemBlockGetSize(DkMemBlock obj);
++bool dkMemBlockIsBorrowed(DkMemBlock obj);
+ DkResult dkMemBlockFlushCpuCache(DkMemBlock obj, uint32_t offset, uint32_t size);
+ 
+ DkResult dkFenceWait(DkFence* obj, int64_t timeout_ns);
+diff --git a/source/dk_memblock.cpp b/source/dk_memblock.cpp
+index 2bc2263..932d1d2 100644
+--- a/source/dk_memblock.cpp
++++ b/source/dk_memblock.cpp
+@@ -106,6 +106,45 @@ DkResult MemBlock::initialize(uint32_t flags, void* storage, uint32_t size)
+ 	return DkResult_Success;
+ }
+ 
++DkResult MemBlock::initializeBorrowed(uint32_t flags, uint32_t nvMapId, uint32_t expectedSize) noexcept
++{
++	uint32_t cpuAccess = (flags >> DkMemBlockFlags_CpuAccessShift) & DkMemAccess_Mask;
++	uint32_t gpuAccess = (flags >> DkMemBlockFlags_GpuAccessShift) & DkMemAccess_Mask;
++	flags &= ~(DkMemBlockFlags_CpuAccessMask | DkMemBlockFlags_GpuAccessMask);
++
++	if (cpuAccess != DkMemAccess_None || gpuAccess == DkMemAccess_None ||
++		(flags & (DkMemBlockFlags_Code | DkMemBlockFlags_ZeroFillInit)))
++		return DkResult_BadInput;
++
++	flags |= gpuAccess << DkMemBlockFlags_GpuAccessShift;
++	m_flags = flags;
++	m_borrowed = true;
++
++	if (R_FAILED(nvMapLoadRemote(&m_mapObj, nvMapId)))
++		return DkResult_Fail;
++	getDevice()->incrNvMapCount();
++
++	if (expectedSize && getSize() != expectedSize)
++		return DkResult_BadInput;
++
++	if (R_FAILED(nvAddressSpaceMap(getDevice()->getAddrSpace(),
++		getHandle(), isGpuCached(), NvKind_Pitch, &m_gpuAddrPitch)))
++		return DkResult_Fail;
++
++	if (flags & DkMemBlockFlags_Image)
++	{
++		if (R_FAILED(nvAddressSpaceMap(getDevice()->getAddrSpace(),
++			getHandle(), isGpuCached(), NvKind_Generic_16BX2, &m_gpuAddrGeneric)))
++			return DkResult_Fail;
++
++		if (R_FAILED(nvAddressSpaceMap(getDevice()->getAddrSpace(),
++			getHandle(), isGpuCached(), NvKind_C32_2CRA, &m_gpuAddrCompressed)))
++			return DkResult_Fail;
++	}
++
++	return DkResult_Success;
++}
++
+ void MemBlock::destroy()
+ {
+ 	if (m_gpuAddrCompressed != DK_GPU_ADDR_INVALID)
+@@ -170,6 +209,22 @@ DkMemBlock dkMemBlockCreate(DkMemBlockMaker const* maker)
+ 	return obj;
+ }
+ 
++DkMemBlock dkMemBlockCreateBorrowed(DkBorrowedMemBlockMaker const* maker)
++{
++	DK_ENTRYPOINT(maker->device);
++	DK_DEBUG_NON_ZERO(maker->nvMapId);
++
++	DkMemBlock obj = new(maker->device) MemBlock(maker->device);
++	DkResult res = obj->initializeBorrowed(maker->flags, maker->nvMapId, maker->expectedSize);
++	if (res != DkResult_Success)
++	{
++		delete obj;
++		DK_ERROR(res, "borrowed NvMap initialization failure");
++		return nullptr;
++	}
++	return obj;
++}
++
+ void dkMemBlockDestroy(DkMemBlock obj)
+ {
+ 	DK_ENTRYPOINT(obj);
+@@ -191,6 +246,11 @@ uint32_t dkMemBlockGetSize(DkMemBlock obj)
+ 	return obj->getSize();
+ }
+ 
++bool dkMemBlockIsBorrowed(DkMemBlock obj)
++{
++	return obj->isBorrowed();
++}
++
+ DkResult dkMemBlockFlushCpuCache(DkMemBlock obj, uint32_t offset, uint32_t size)
+ {
+ 	DK_ENTRYPOINT(obj);
+diff --git a/source/dk_memblock.h b/source/dk_memblock.h
+index c44e4d9..ebefb38 100644
+--- a/source/dk_memblock.h
++++ b/source/dk_memblock.h
+@@ -10,17 +10,19 @@ class MemBlock : public ObjBase
+ 	uint32_t m_flags;
+ 	uint32_t m_codeSegOffset;
+ 	void* m_ownedMem;
++	bool m_borrowed;
+ 	DkGpuAddr m_gpuAddrPitch;
+ 	DkGpuAddr m_gpuAddrGeneric;
+ 	DkGpuAddr m_gpuAddrCompressed;
+ 
+ public:
+ 	constexpr MemBlock(DkDevice dev) noexcept : ObjBase{dev},
+-		m_mapObj{}, m_flags{}, m_codeSegOffset{}, m_ownedMem{},
++		m_mapObj{}, m_flags{}, m_codeSegOffset{}, m_ownedMem{}, m_borrowed{},
+ 		m_gpuAddrPitch{DK_GPU_ADDR_INVALID},
+ 		m_gpuAddrGeneric{DK_GPU_ADDR_INVALID},
+ 		m_gpuAddrCompressed{DK_GPU_ADDR_INVALID} { }
+ 	~MemBlock() { destroy(); }
+ 
+ 	DkResult initialize(uint32_t flags, void* storage, uint32_t size) noexcept;
++	DkResult initializeBorrowed(uint32_t flags, uint32_t nvMapId, uint32_t expectedSize) noexcept;
+ 	void destroy();
+@@ -36,6 +38,7 @@ public:
+ 	constexpr bool isGpuCached() const noexcept { return getGpuAccess() == DkMemAccess_Cached; }
+ 	constexpr bool isCode() const noexcept { return (m_flags & DkMemBlockFlags_Code) != 0; }
+ 	constexpr bool isImage() const noexcept { return (m_flags & DkMemBlockFlags_Image) != 0; }
++	constexpr bool isBorrowed() const noexcept { return m_borrowed; }
+ 
+ 	uint32_t getHandle() const noexcept { return nvMapGetHandle(&m_mapObj); }
+ 	uint32_t getId() const noexcept { return nvMapGetId(&m_mapObj); }

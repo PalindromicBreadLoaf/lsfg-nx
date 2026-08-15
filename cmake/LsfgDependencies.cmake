@@ -7,6 +7,7 @@ set(LSFG_SALTYNX_COMMIT "f3a89e251ef659434ac84781a26986e15fa41fd9" CACHE STRING 
 set(LSFG_LIBULTRAHAND_COMMIT "856ddbddd796fc4a59ad2e0bf939c5963e6f9dd2" CACHE STRING "libultrahand revision (tag v2.5.3)")
 set(LSFG_SPIRV_CROSS_COMMIT "ebe2aa0cd80f5eb5cd8a605da604cacf72205f3b" CACHE STRING "SPIRV-Cross revision")
 set(LSFG_UAM_COMMIT "c0d76aa9107d67edcd35a1b717ace87ee7939c68" CACHE STRING "uam revision")
+set(LSFG_DEKO3D_COMMIT "5cc144dcf5606fbcd78430f6c62923546e5f9cf4" CACHE STRING "deko3d revision (tag v0.5.0)")
 
 set(LSFG_OFFLINE_DEPS_DIR "" CACHE PATH "Directory of pre-cloned dependencies for offline builds")
 
@@ -41,6 +42,7 @@ lsfg_declare_dependency(saltynx "https://github.com/masagrator/SaltyNX.git" "${L
 lsfg_declare_dependency(libultrahand "https://github.com/ppkantorski/libultrahand.git" "${LSFG_LIBULTRAHAND_COMMIT}")
 lsfg_declare_dependency(spirv_cross "https://github.com/KhronosGroup/SPIRV-Cross.git" "${LSFG_SPIRV_CROSS_COMMIT}" NO_BUILD_SYSTEM)
 lsfg_declare_dependency(uam "https://github.com/PalindromicBreadLoaf/uam.git" "${LSFG_UAM_COMMIT}" NO_BUILD_SYSTEM)
+lsfg_declare_dependency(deko3d "https://github.com/devkitPro/deko3d.git" "${LSFG_DEKO3D_COMMIT}" NO_BUILD_SYSTEM)
 
 # Both projects build with Make and produce artifacts this
 # repository does not want.
@@ -65,4 +67,9 @@ endfunction()
 function(lsfg_require_uam)
     FetchContent_MakeAvailable(uam)
     set(LSFG_UAM_SOURCE_DIR "${uam_SOURCE_DIR}" PARENT_SCOPE)
+endfunction()
+
+function(lsfg_require_deko3d)
+    FetchContent_MakeAvailable(deko3d)
+    set(LSFG_DEKO3D_SOURCE_DIR "${deko3d_SOURCE_DIR}" PARENT_SCOPE)
 endfunction()
