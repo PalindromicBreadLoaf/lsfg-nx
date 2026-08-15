@@ -1,5 +1,10 @@
 set(sd_package_root "${CMAKE_BINARY_DIR}/sd-package")
-set(paper_mario_title_id "0100ECD018EBE000")
+
+# Currently support titles
+set(plugin_title_ids
+    "0100ECD018EBE000" # Paper Mario: The Thousand-Year Door
+    "0100E95004038000" # Xenoblade Chronicles 2
+)
 
 get_target_property(prepare_nro_file lsfg_prepare_nro DKP_FILE)
 get_target_property(test_pattern_nro_file lsfg_test_pattern_nro DKP_FILE)
@@ -11,7 +16,6 @@ endif()
 set(package_commands
     COMMAND "${CMAKE_COMMAND}" -E rm -rf "${sd_package_root}"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${sd_package_root}/switch/lsfg-nx"
-    COMMAND "${CMAKE_COMMAND}" -E make_directory "${sd_package_root}/SaltySD/plugins/${paper_mario_title_id}"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${sd_package_root}/SaltySD/plugins/lsfg-nx/profiles"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${sd_package_root}/switch/.overlays"
     COMMAND "${CMAKE_COMMAND}" -E copy
@@ -20,13 +24,24 @@ set(package_commands
     COMMAND "${CMAKE_COMMAND}" -E copy
         "${test_pattern_nro_file}"
         "${sd_package_root}/switch/lsfg-nx/test-pattern.nro"
-    COMMAND "${CMAKE_COMMAND}" -E copy
-        "$<TARGET_FILE:lsfg_plugin>"
-        "${sd_package_root}/SaltySD/plugins/${paper_mario_title_id}/lsfg-nx.elf"
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory
+        "${PROJECT_SOURCE_DIR}/profiles"
+        "${sd_package_root}/SaltySD/plugins/lsfg-nx/profiles"
     COMMAND "${CMAKE_COMMAND}" -E copy
         "${PROJECT_SOURCE_DIR}/packaging/README.txt"
         "${sd_package_root}/README.txt"
 )
+
+foreach(title_id IN LISTS plugin_title_ids)
+    list(
+        APPEND package_commands
+        COMMAND "${CMAKE_COMMAND}" -E make_directory
+            "${sd_package_root}/SaltySD/plugins/${title_id}"
+        COMMAND "${CMAKE_COMMAND}" -E copy
+            "$<TARGET_FILE:lsfg_plugin>"
+            "${sd_package_root}/SaltySD/plugins/${title_id}/lsfg-nx.elf"
+    )
+endforeach()
 
 set(package_dependencies lsfg_prepare_nro lsfg_test_pattern_nro lsfg_plugin)
 
