@@ -104,6 +104,34 @@ void test_protocol_status_message() {
     require(status.message_view() == "short", "shorter message replaces the longer one");
 }
 
+void test_protocol_report_ring() {
+    lsfg::protocol::ReportBlock reports{};
+    lsfg::protocol::initialize(reports);
+    require(lsfg::succeeded(lsfg::protocol::validate(reports)), "initialized report ring is valid");
+    require(!lsfg::protocol::push_report(reports, {}), "report ring rejects empty lines");
+    lsfg::protocol::consume_report(reports);
+
+    for (std::size_t index = 0; index < lsfg::protocol::report_slot_count; ++index) {
+        require(lsfg::protocol::push_report(reports, std::to_string(index)), "report ring accepts capacity");
+    }
+    require(!lsfg::protocol::push_report(reports, "overflow"), "report ring rejects overflow");
+    require(lsfg::protocol::dropped_reports(reports) == 1, "report ring counts overflow");
+
+    for (std::size_t index = 0; index < lsfg::protocol::report_slot_count; ++index) {
+        require(
+            lsfg::protocol::peek_report(reports) == std::to_string(index),
+            "report ring preserves order");
+        lsfg::protocol::consume_report(reports);
+    }
+    require(lsfg::protocol::peek_report(reports).empty(), "consumed report ring is empty");
+
+    const std::string oversized(lsfg::protocol::report_line_capacity + 20U, 'r');
+    require(lsfg::protocol::push_report(reports, oversized), "report ring accepts long line");
+    require(
+        lsfg::protocol::peek_report(reports).size() == lsfg::protocol::report_line_capacity,
+        "report ring truncates long line");
+}
+
 // A header the runtime would accept, so that each check below can spoil one
 // field at a time.
 lsfg::cache::ManifestHeader plausible_header() {
@@ -232,6 +260,7 @@ int main() {
     test_log_wrap_and_clear();
     test_protocol_defaults();
     test_protocol_status_message();
+    test_protocol_report_ring();
     test_cache_manifest_validation();
     test_cache_configuration_round_trip();
     test_cache_pass_interface();

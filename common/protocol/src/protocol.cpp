@@ -4,6 +4,8 @@
 #include <lsfg/common/protocol.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <cstring>
 
 namespace lsfg::protocol {
 
@@ -17,6 +19,15 @@ void initialize(StatusBlock& status) noexcept {
     status = StatusBlock{};
     status.abi_version = abi_version;
     status.struct_size = static_cast<std::uint32_t>(sizeof(StatusBlock));
+}
+
+void initialize(ReportBlock& reports) noexcept {
+    reports = ReportBlock{};
+    reports.magic = report_magic;
+    reports.abi_version = abi_version;
+    reports.struct_size = static_cast<std::uint32_t>(sizeof(ReportBlock));
+    reports.slot_count = report_slot_count;
+    reports.line_capacity = report_line_capacity;
 }
 
 ErrorCode validate(const ControlBlock& control) noexcept {
@@ -61,6 +72,72 @@ ErrorCode validate(const StatusBlock& status) noexcept {
         return ErrorCode::protocol_message_invalid;
     }
     return ErrorCode::ok;
+}
+
+ErrorCode validate(const ReportBlock& reports) noexcept {
+    if (reports.magic != report_magic || reports.abi_version != abi_version) {
+        return ErrorCode::protocol_version_mismatch;
+    }
+    if (reports.struct_size != sizeof(ReportBlock)
+        || reports.slot_count != report_slot_count
+        || reports.line_capacity != report_line_capacity) {
+        return ErrorCode::protocol_version_mismatch;
+    }
+    return ErrorCode::ok;
+}
+
+bool push_report(ReportBlock& reports, const std::string_view text) noexcept {
+    if (text.empty()) {
+        return false;
+    }
+
+    std::atomic_ref write{reports.write_sequence};
+    std::atomic_ref read{reports.read_sequence};
+    std::atomic_ref dropped{reports.dropped};
+
+    const std::uint64_t next = write.load(std::memory_order_relaxed);
+    if (next - read.load(std::memory_order_acquire) >= report_slot_count) {
+        dropped.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+
+    ReportSlot& slot
+        = reports.slots[static_cast<std::size_t>(next % report_slot_count)];
+    slot.length = static_cast<std::uint32_t>(std::min(text.size(), slot.text.size()));
+    std::memcpy(slot.text.data(), text.data(), slot.length);
+    write.store(next + 1, std::memory_order_release);
+    return true;
+}
+
+std::string_view peek_report(ReportBlock& reports) noexcept {
+    std::atomic_ref write{reports.write_sequence};
+    std::atomic_ref read{reports.read_sequence};
+
+    const std::uint64_t next = read.load(std::memory_order_relaxed);
+    if (next == write.load(std::memory_order_acquire)) {
+        return {};
+    }
+
+    ReportSlot& slot
+        = reports.slots[static_cast<std::size_t>(next % report_slot_count)];
+    if (slot.length > slot.text.size()) {
+        return {};
+    }
+    return {slot.text.data(), slot.length};
+}
+
+void consume_report(ReportBlock& reports) noexcept {
+    std::atomic_ref write{reports.write_sequence};
+    std::atomic_ref read{reports.read_sequence};
+    const std::uint64_t next = read.load(std::memory_order_relaxed);
+    if (next != write.load(std::memory_order_acquire)) {
+        read.store(next + 1, std::memory_order_release);
+    }
+}
+
+std::uint64_t dropped_reports(ReportBlock& reports) noexcept {
+    std::atomic_ref dropped{reports.dropped};
+    return dropped.load(std::memory_order_acquire);
 }
 
 void set_message(StatusBlock& status, const std::string_view message) noexcept {

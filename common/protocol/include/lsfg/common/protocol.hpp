@@ -13,9 +13,12 @@
 namespace lsfg::protocol {
 
 // Bump on any layout or semantic change.
-inline constexpr std::uint32_t abi_version = 1;
+inline constexpr std::uint32_t abi_version = 2;
 
 inline constexpr std::size_t message_capacity = 96;
+inline constexpr std::uint64_t report_magic = 0x4c53464752455054;
+inline constexpr std::size_t report_line_capacity = 192;
+inline constexpr std::size_t report_slot_count = 18;
 
 enum class GenerationMode : std::uint8_t {
     off = 0,
@@ -114,10 +117,33 @@ struct alignas(8) StatusBlock {
     }
 };
 
+struct alignas(8) ReportSlot {
+    std::uint32_t length{};
+    std::uint32_t reserved{};
+    std::array<char, report_line_capacity> text{};
+};
+
+struct alignas(8) ReportBlock {
+    std::uint64_t magic{};
+    std::uint32_t abi_version{};
+    std::uint32_t struct_size{};
+    std::uint32_t slot_count{};
+    std::uint32_t line_capacity{};
+
+    std::uint64_t write_sequence{};
+    std::uint64_t read_sequence{};
+    std::uint64_t dropped{};
+
+    std::array<ReportSlot, report_slot_count> slots{};
+};
+
 static_assert(sizeof(ControlBlock) == 32);
 static_assert(sizeof(StatusBlock) == 208);
+static_assert(sizeof(ReportSlot) == 200);
+static_assert(sizeof(ReportBlock) == 3648);
 static_assert(alignof(ControlBlock) == 8);
 static_assert(alignof(StatusBlock) == 8);
+static_assert(alignof(ReportBlock) == 8);
 
 [[nodiscard]] constexpr bool sequence_is_stable(const std::uint64_t sequence) noexcept {
     return (sequence & 1U) == 0U;
@@ -125,9 +151,16 @@ static_assert(alignof(StatusBlock) == 8);
 
 void initialize(ControlBlock& control) noexcept;
 void initialize(StatusBlock& status) noexcept;
+void initialize(ReportBlock& reports) noexcept;
 
 [[nodiscard]] ErrorCode validate(const ControlBlock& control) noexcept;
 [[nodiscard]] ErrorCode validate(const StatusBlock& status) noexcept;
+[[nodiscard]] ErrorCode validate(const ReportBlock& reports) noexcept;
+
+[[nodiscard]] bool push_report(ReportBlock& reports, std::string_view text) noexcept;
+[[nodiscard]] std::string_view peek_report(ReportBlock& reports) noexcept;
+void consume_report(ReportBlock& reports) noexcept;
+[[nodiscard]] std::uint64_t dropped_reports(ReportBlock& reports) noexcept;
 
 void set_message(StatusBlock& status, std::string_view message) noexcept;
 
