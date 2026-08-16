@@ -10,6 +10,8 @@
 
 namespace lsfg::plugin::report {
 
+[[nodiscard]] bool prepare_shared_transport() noexcept;
+
 void configure(
     bool enabled, bool verbose, std::uint32_t presents_between_reports) noexcept;
 

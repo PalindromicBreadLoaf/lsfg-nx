@@ -5,9 +5,11 @@
 
 #include "observations.hpp"
 
+#include <lsfg/common/protocol.hpp>
+
 #include <switch.h>
 
-#include <ipc.h>
+#include <saltysd_ipc.h>
 
 #define NANOPRINTF_IMPLEMENTATION
 #define NANOPRINTF_VISIBILITY_STATIC
@@ -16,8 +18,9 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <cstdarg>
-#include <cstring>
+#include <cstddef>
+#include <cstdint>
+#include <string_view>
 
 namespace lsfg::plugin::report {
 namespace {
@@ -28,152 +31,25 @@ std::atomic<std::uint32_t> g_period{0};
 std::atomic<std::uint32_t> g_presents{0};
 std::atomic_flag g_report_lock{};
 
-constexpr std::uint64_t command_end_session = 0;
-constexpr std::uint64_t command_sdcard_fopen = 20;
-constexpr std::uint64_t command_sdcard_fclose = 22;
-constexpr std::uint64_t command_sdcard_fwrite = 26;
-constexpr const char* log_path = "sdmc:/SaltySD/saltynx_core.log";
+constexpr std::size_t format_size = 512;
+constexpr std::size_t salty_shared_size = 0x1000;
+constexpr std::size_t salty_reserved_prefix = 4;
+constexpr std::size_t report_reservation_size
+    = salty_reserved_prefix + sizeof(protocol::ReportBlock)
+    + alignof(protocol::ReportBlock) - 1;
 
-class Client {
-public:
-    [[nodiscard]] bool connect() noexcept {
-        for (std::uint32_t attempt = 0; attempt < 200; ++attempt) {
-            if (R_SUCCEEDED(svcConnectToNamedPort(&m_handle, "SaltySD"))) {
-                return true;
-            }
-            svcSleepThread(1'000'000);
-        }
-        return false;
+SharedMemory g_shared_memory{};
+protocol::ReportBlock* g_shared_reports{};
+
+void lock_reports() noexcept {
+    while (g_report_lock.test_and_set(std::memory_order_acquire)) {
+        asm volatile("yield" ::: "memory");
     }
+}
 
-    void close() noexcept {
-        if (m_handle == INVALID_HANDLE) {
-            return;
-        }
-
-        IpcCommand command;
-        ipcInitialize(&command);
-        ipcSendPid(&command);
-
-        struct Request {
-            std::uint64_t magic;
-            std::uint64_t command_id;
-            std::uint64_t zero;
-            std::uint64_t reserved[2];
-        };
-
-        auto* const request = static_cast<Request*>(ipcPrepareHeader(&command, sizeof(Request)));
-        *request = Request{SFCI_MAGIC, command_end_session, 0, {0, 0}};
-        ipcDispatch(m_handle);
-        svcCloseHandle(m_handle);
-        m_handle = INVALID_HANDLE;
-    }
-
-    [[nodiscard]] bool print(const char* const format, ...) noexcept {
-        std::array<char, 512> text{};
-
-        va_list arguments;
-        va_start(arguments, format);
-        const int required = npf_vsnprintf(text.data(), text.size(), format, arguments);
-        va_end(arguments);
-
-        if (required <= 0) {
-            return false;
-        }
-
-        const std::size_t length = std::min(
-            static_cast<std::size_t>(required), text.size() - 1);
-        const std::uint32_t file = open_log();
-        if (file == 0) {
-            return false;
-        }
-
-        const bool written = write(file, text.data(), length);
-        close_file(file);
-        return written;
-    }
-
-private:
-    [[nodiscard]] std::uint32_t open_log() noexcept {
-        IpcCommand command;
-        ipcInitialize(&command);
-        ipcSendPid(&command);
-        ipcAddSendBuffer(
-            &command, log_path, std::strlen(log_path) + 1, BufferType_Normal);
-
-        struct Request {
-            std::uint64_t magic;
-            std::uint64_t command_id;
-            char mode[4];
-        };
-
-        auto* const request = static_cast<Request*>(ipcPrepareHeader(&command, sizeof(Request)));
-        *request = Request{SFCI_MAGIC, command_sdcard_fopen, {'a', 'b', '\0', '\0'}};
-        if (R_FAILED(ipcDispatch(m_handle))) {
-            return 0;
-        }
-
-        IpcParsedCommand response;
-        ipcParse(&response);
-        struct Reply {
-            std::uint64_t magic;
-            std::uint64_t result;
-            std::uint32_t id;
-        };
-        const auto* const reply = static_cast<const Reply*>(response.Raw);
-        return reply->magic == SFCO_MAGIC && R_SUCCEEDED(reply->result) ? reply->id : 0;
-    }
-
-    [[nodiscard]] bool write(
-        const std::uint32_t file, const void* const data, const std::size_t size) noexcept {
-        IpcCommand command;
-        ipcInitialize(&command);
-        ipcSendPid(&command);
-        ipcAddSendBuffer(&command, data, size, BufferType_Normal);
-
-        struct Request {
-            std::uint64_t magic;
-            std::uint64_t command_id;
-            std::uint64_t size;
-            std::uint64_t count;
-            std::uint32_t id;
-        };
-
-        auto* const request = static_cast<Request*>(ipcPrepareHeader(&command, sizeof(Request)));
-        *request = Request{SFCI_MAGIC, command_sdcard_fwrite, size, 1, file};
-        if (R_FAILED(ipcDispatch(m_handle))) {
-            return false;
-        }
-
-        IpcParsedCommand response;
-        ipcParse(&response);
-        struct Reply {
-            std::uint64_t magic;
-            std::uint64_t result;
-            std::uint64_t count;
-        };
-        const auto* const reply = static_cast<const Reply*>(response.Raw);
-        return reply->magic == SFCO_MAGIC && R_SUCCEEDED(reply->result) && reply->count == 1;
-    }
-
-    void close_file(const std::uint32_t file) noexcept {
-        IpcCommand command;
-        ipcInitialize(&command);
-        ipcSendPid(&command);
-
-        struct Request {
-            std::uint64_t magic;
-            std::uint64_t command_id;
-            std::uint32_t id;
-        };
-
-        auto* const request = static_cast<Request*>(ipcPrepareHeader(&command, sizeof(Request)));
-        *request = Request{SFCI_MAGIC, command_sdcard_fclose, file};
-        ipcDispatch(m_handle);
-    }
-
-    Handle m_handle{INVALID_HANDLE};
-};
+void unlock_reports() noexcept {
+    g_report_lock.clear(std::memory_order_release);
+}
 
 class Session {
 public:
@@ -181,35 +57,36 @@ public:
         if (!g_enabled.load(std::memory_order_relaxed)) {
             return;
         }
-        while (g_report_lock.test_and_set(std::memory_order_acquire)) {
-            asm volatile("yield" ::: "memory");
-        }
+        lock_reports();
         locked_ = true;
-        connected_ = client_.connect();
+        writable_ = g_shared_reports != nullptr;
     }
 
     ~Session() {
-        if (connected_) {
-            client_.close();
-        }
         if (locked_) {
-            g_report_lock.clear(std::memory_order_release);
+            unlock_reports();
         }
     }
 
     [[nodiscard]] explicit operator bool() const noexcept {
-        return connected_;
+        return writable_;
     }
 
     template <typename... Args>
     void print(const char* const format, Args... args) noexcept {
-        (void)client_.print(format, args...);
+        std::array<char, format_size> text{};
+        const int required = npf_snprintf(text.data(), text.size(), format, args...);
+        if (required <= 0) {
+            return;
+        }
+        const std::size_t length
+            = std::min(static_cast<std::size_t>(required), text.size() - 1);
+        (void)protocol::push_report(*g_shared_reports, {text.data(), length});
     }
 
 private:
-    Client client_{};
     bool locked_{};
-    bool connected_{};
+    bool writable_{};
 };
 
 void print_stat(
@@ -283,6 +160,44 @@ void write_pacing(Session& session) noexcept {
 }
 
 } // namespace
+
+bool prepare_shared_transport() noexcept {
+    ptrdiff_t offset = -1;
+    if (R_FAILED(SaltySD_CheckIfSharedMemoryAvailable(
+            &offset, report_reservation_size))
+        || offset < 0) {
+        return false;
+    }
+
+    Handle handle = INVALID_HANDLE;
+    if (R_FAILED(SaltySD_GetSharedMemoryHandle(&handle)) || handle == INVALID_HANDLE) {
+        return false;
+    }
+
+    shmemLoadRemote(&g_shared_memory, handle, salty_shared_size, Perm_Rw);
+    if (R_FAILED(shmemMap(&g_shared_memory))) {
+        shmemClose(&g_shared_memory);
+        g_shared_memory = {};
+        return false;
+    }
+
+    const std::uintptr_t base
+        = reinterpret_cast<std::uintptr_t>(shmemGetAddr(&g_shared_memory));
+    const std::uintptr_t reservation = base + static_cast<std::uintptr_t>(offset);
+    const std::uintptr_t aligned
+        = (reservation + salty_reserved_prefix + alignof(protocol::ReportBlock) - 1)
+        & ~(static_cast<std::uintptr_t>(alignof(protocol::ReportBlock)) - 1);
+    if (aligned + sizeof(protocol::ReportBlock) > reservation + report_reservation_size
+        || aligned + sizeof(protocol::ReportBlock) > base + salty_shared_size) {
+        shmemClose(&g_shared_memory);
+        g_shared_memory = {};
+        return false;
+    }
+
+    g_shared_reports = reinterpret_cast<protocol::ReportBlock*>(aligned);
+    protocol::initialize(*g_shared_reports);
+    return true;
+}
 
 void configure(const bool enabled, const bool verbose,
     const std::uint32_t presents_between_reports) noexcept {

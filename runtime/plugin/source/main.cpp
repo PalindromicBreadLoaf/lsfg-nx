@@ -192,6 +192,13 @@ int main() {
     g_reporting_enabled = flag_present(log_flag);
     g_verbose_trace = flag_present(trace_flag);
 
+    if (g_reporting_enabled && !lsfg::plugin::report::prepare_shared_transport()) {
+        SaltySDCore_printf("lsfg-nx: shared report transport unavailable\n");
+        g_reporting_enabled = false;
+    } else if (g_reporting_enabled) {
+        SaltySDCore_printf("lsfg-nx: shared report transport ready\n");
+    }
+
     report_import_survey();
 
     if (!lsfg::plugin::deferred::arm(&install_hooks)) {
