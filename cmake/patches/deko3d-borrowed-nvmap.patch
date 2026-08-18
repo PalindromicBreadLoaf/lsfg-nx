@@ -42,10 +42,12 @@ diff --git a/source/dk_memblock.cpp b/source/dk_memblock.cpp
 index 2bc2263..932d1d2 100644
 --- a/source/dk_memblock.cpp
 +++ b/source/dk_memblock.cpp
-@@ -106,6 +106,45 @@ DkResult MemBlock::initialize(uint32_t flags, void* storage, uint32_t size)
+@@ -106,6 +106,46 @@ DkResult MemBlock::initialize(uint32_t flags, void* storage, uint32_t size)
  	return DkResult_Success;
  }
  
++static_assert(sizeof(MemBlock) == 0x50);
++
 +DkResult MemBlock::initializeBorrowed(uint32_t flags, uint32_t nvMapId, uint32_t expectedSize) noexcept
 +{
 +	uint32_t cpuAccess = (flags >> DkMemBlockFlags_CpuAccessShift) & DkMemAccess_Mask;
@@ -57,8 +59,7 @@ index 2bc2263..932d1d2 100644
 +		return DkResult_BadInput;
 +
 +	flags |= gpuAccess << DkMemBlockFlags_GpuAccessShift;
-+	m_flags = flags;
-+	m_borrowed = true;
++	m_flags = flags | borrowed_flag;
 +
 +	if (R_FAILED(nvMapLoadRemote(&m_mapObj, nvMapId)))
 +		return DkResult_Fail;
@@ -88,7 +89,7 @@ index 2bc2263..932d1d2 100644
  void MemBlock::destroy()
  {
  	if (m_gpuAddrCompressed != DK_GPU_ADDR_INVALID)
-@@ -170,6 +209,22 @@ DkMemBlock dkMemBlockCreate(DkMemBlockMaker const* maker)
+@@ -170,6 +210,22 @@ DkMemBlock dkMemBlockCreate(DkMemBlockMaker const* maker)
  	return obj;
  }
  
@@ -111,7 +112,7 @@ index 2bc2263..932d1d2 100644
  void dkMemBlockDestroy(DkMemBlock obj)
  {
  	DK_ENTRYPOINT(obj);
-@@ -191,6 +246,11 @@ uint32_t dkMemBlockGetSize(DkMemBlock obj)
+@@ -191,6 +247,11 @@ uint32_t dkMemBlockGetSize(DkMemBlock obj)
  	return obj->getSize();
  }
  
@@ -131,7 +132,7 @@ index c44e4d9..ebefb38 100644
  	uint32_t m_flags;
  	uint32_t m_codeSegOffset;
  	void* m_ownedMem;
-+	bool m_borrowed;
++	static constexpr uint32_t borrowed_flag = 1U << 31;
  	DkGpuAddr m_gpuAddrPitch;
  	DkGpuAddr m_gpuAddrGeneric;
  	DkGpuAddr m_gpuAddrCompressed;
@@ -139,7 +140,7 @@ index c44e4d9..ebefb38 100644
  public:
  	constexpr MemBlock(DkDevice dev) noexcept : ObjBase{dev},
 -		m_mapObj{}, m_flags{}, m_codeSegOffset{}, m_ownedMem{},
-+		m_mapObj{}, m_flags{}, m_codeSegOffset{}, m_ownedMem{}, m_borrowed{},
++		m_mapObj{}, m_flags{}, m_codeSegOffset{}, m_ownedMem{},
  		m_gpuAddrPitch{DK_GPU_ADDR_INVALID},
  		m_gpuAddrGeneric{DK_GPU_ADDR_INVALID},
  		m_gpuAddrCompressed{DK_GPU_ADDR_INVALID} { }
@@ -152,7 +153,7 @@ index c44e4d9..ebefb38 100644
  	constexpr bool isGpuCached() const noexcept { return getGpuAccess() == DkMemAccess_Cached; }
  	constexpr bool isCode() const noexcept { return (m_flags & DkMemBlockFlags_Code) != 0; }
  	constexpr bool isImage() const noexcept { return (m_flags & DkMemBlockFlags_Image) != 0; }
-+	constexpr bool isBorrowed() const noexcept { return m_borrowed; }
++	constexpr bool isBorrowed() const noexcept { return (m_flags & borrowed_flag) != 0; }
  
  	uint32_t getHandle() const noexcept { return nvMapGetHandle(&m_mapObj); }
  	uint32_t getId() const noexcept { return nvMapGetId(&m_mapObj); }
