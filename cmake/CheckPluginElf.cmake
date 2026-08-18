@@ -7,6 +7,15 @@ if(NOT EXISTS "${PLUGIN_ELF}")
     message(FATAL_ERROR "plugin ELF not found: ${PLUGIN_ELF}")
 endif()
 
+# SaltyNX 1.9.0 maps a fixed 2 MiB scratch window and reads the whole ELF into it.
+file(SIZE "${PLUGIN_ELF}" plugin_size)
+if(plugin_size GREATER_EQUAL 2097152)
+    message(
+        FATAL_ERROR
+        "plugin ELF is ${plugin_size} bytes, which does not fit SaltyNX's 2 MiB loader window"
+    )
+endif()
+
 execute_process(
     COMMAND "${READELF}" --dynamic --relocs --wide "${PLUGIN_ELF}"
     OUTPUT_VARIABLE elf_info
@@ -64,6 +73,20 @@ if(all_syms MATCHES "newlibSetup")
     message(
         FATAL_ERROR
         "Drop the reference to newlibSetup."
+    )
+endif()
+
+if(all_syms MATCHES "svcGetResourceLimit(Limit|Current|Peak)Value")
+    message(
+        FATAL_ERROR
+        "plugin calls a privileged resource limit SVC that retail applications may not permit"
+    )
+endif()
+
+if(all_syms MATCHES " sm(Initialize|GetService|Exit)(\n|$)")
+    message(
+        FATAL_ERROR
+        "plugin links independent service manager startup instead of the borrowed host session"
     )
 endif()
 
