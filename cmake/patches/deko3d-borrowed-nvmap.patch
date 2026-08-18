@@ -25,7 +25,7 @@ index 0f208dd..def3edb 100644
  typedef enum DkVarOp
  {
  	DkVarOp_Set = 0,
-@@ -1231,10 +1246,12 @@ DK_CONSTEXPR uint64_t dkTimestampToNs(uint64_t ts);
+@@ -1231,10 +1247,12 @@ DK_CONSTEXPR uint64_t dkTimestampToNs(uint64_t ts);
  DK_CONSTEXPR uint64_t dkNsToTimestamp(uint64_t ns);
  
  DkMemBlock dkMemBlockCreate(DkMemBlockMaker const* maker);
@@ -38,11 +38,56 @@ index 0f208dd..def3edb 100644
  DkResult dkMemBlockFlushCpuCache(DkMemBlock obj, uint32_t offset, uint32_t size);
  
  DkResult dkFenceWait(DkFence* obj, int64_t timeout_ns);
+@@ -1339,3 +1357,5 @@ void dkImageLayoutInitialize(DkImageLayout* obj, DkImageLayoutMaker const* maker
+ void dkImageLayoutInitialize(DkImageLayout* obj, DkImageLayoutMaker const* maker);
++DkResult dkImageLayoutApplyExternal(DkImageLayout* obj, uint32_t nvKind, uint64_t expectedSize, uint32_t expectedAlignment);
++uint32_t dkImageLayoutGetNvKind(DkImageLayout const* obj);
+ uint64_t dkImageLayoutGetSize(DkImageLayout const* obj);
+ uint32_t dkImageLayoutGetAlignment(DkImageLayout const* obj);
+diff --git a/source/dk_image.h b/source/dk_image.h
+index 8982e4c..de896ed 100644
+--- a/source/dk_image.h
++++ b/source/dk_image.h
+@@ -32,1 +32,19 @@ struct ImageLayout
++
++	DkResult applyExternal(uint32_t nvKind, uint64_t expectedSize, uint32_t expectedAlignment) noexcept
++	{
++		if (nvKind > UINT8_MAX || expectedSize == 0 || expectedAlignment == 0 ||
++			(expectedAlignment & (expectedAlignment - 1)) != 0 ||
++			(expectedSize & (expectedAlignment - 1)) != 0)
++			return DkResult_BadInput;
++
++		uint64_t naturalSize = m_layerSize;
++		if (m_hasLayers)
++			naturalSize *= m_dimensions[2];
++		if (naturalSize != expectedSize || m_memKind != nvKind)
++			return DkResult_BadInput;
++
++		m_storageSize = expectedSize;
++		m_alignment = expectedAlignment;
++		return DkResult_Success;
++	}
+ };
 diff --git a/source/dk_memblock.cpp b/source/dk_memblock.cpp
 index 2bc2263..932d1d2 100644
 --- a/source/dk_memblock.cpp
 +++ b/source/dk_memblock.cpp
-@@ -106,6 +106,46 @@ DkResult MemBlock::initialize(uint32_t flags, void* storage, uint32_t size)
+@@ -2,1 +2,2 @@
++#include "dk_image.h"
+ #include "dk_device.h"
+@@ -6,1 +7,11 @@
++DkResult dkImageLayoutApplyExternal(DkImageLayout* obj, uint32_t nvKind, uint64_t expectedSize, uint32_t expectedAlignment)
++{
++	return obj->applyExternal(nvKind, expectedSize, expectedAlignment);
++}
++
++uint32_t dkImageLayoutGetNvKind(DkImageLayout const* obj)
++{
++	return obj->m_memKind;
++}
++
+ DkResult MemBlock::initialize(uint32_t flags, void* storage, uint32_t size)
+@@ -106,6 +117,46 @@ DkResult MemBlock::initialize(uint32_t flags, void* storage, uint32_t size)
  	return DkResult_Success;
  }
  
@@ -89,7 +134,7 @@ index 2bc2263..932d1d2 100644
  void MemBlock::destroy()
  {
  	if (m_gpuAddrCompressed != DK_GPU_ADDR_INVALID)
-@@ -170,6 +210,22 @@ DkMemBlock dkMemBlockCreate(DkMemBlockMaker const* maker)
+@@ -170,6 +221,22 @@ DkMemBlock dkMemBlockCreate(DkMemBlockMaker const* maker)
  	return obj;
  }
  
@@ -112,7 +157,7 @@ index 2bc2263..932d1d2 100644
  void dkMemBlockDestroy(DkMemBlock obj)
  {
  	DK_ENTRYPOINT(obj);
-@@ -191,6 +247,11 @@ uint32_t dkMemBlockGetSize(DkMemBlock obj)
+@@ -191,6 +258,11 @@ uint32_t dkMemBlockGetSize(DkMemBlock obj)
  	return obj->getSize();
  }
  
