@@ -100,14 +100,47 @@ void report_coexistence_progress(const coexistence::Stage stage) noexcept {
     report::on_coexistence_progress(coexistence::stage_name(stage));
 }
 
+[[nodiscard]] coexistence::ExternalLayout current_external_layout() noexcept {
+    const Observe observe;
+    const instrument::SwapchainMap& map = observe->swapchain;
+    if (!map.complete() || !map.uniform) {
+        return {};
+    }
+
+    const instrument::TextureRecord& texture = map.textures[0];
+    return coexistence::ExternalLayout{
+        texture.storage_offset,
+        texture.storage_size,
+        texture.pool_size,
+        texture.storage_alignment,
+        texture.width,
+        texture.height,
+        texture.depth,
+        texture.levels,
+        texture.samples,
+        texture.format,
+        texture.flags,
+        texture.target,
+        texture.stride,
+        texture.pool_flags,
+        texture.storage_class,
+    };
+}
+
 void coexistence_worker(void*) {
     report::on_coexistence_started();
     svcSleepThread(coexistence_start_delay_ns);
-    const coexistence::Result result = coexistence::run(&report_coexistence_progress);
+    const coexistence::Result result
+        = coexistence::run(current_external_layout(), &report_coexistence_progress);
     report::on_coexistence_finished(coexistence::stage_name(result.stage),
         result.passed,
         result.value,
-        result.arena_bytes);
+        result.arena_bytes,
+        result.layout_passed,
+        result.layout_result,
+        result.layout_size,
+        result.layout_alignment,
+        result.layout_kind);
 }
 
 [[nodiscard]] ::Result start_coexistence_worker() noexcept {
@@ -385,6 +418,11 @@ void queue_present_texture(
             report::on_coexistence_finished("worker_start",
                 false,
                 static_cast<std::uint32_t>(result),
+                0,
+                false,
+                DkResult_Fail,
+                0,
+                0,
                 0);
         }
     }

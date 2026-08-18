@@ -242,16 +242,27 @@ void on_coexistence_progress(const char* const stage) noexcept {
 void on_coexistence_finished(const char* const stage,
     const bool passed,
     const std::uint32_t value,
-    const std::size_t arena_bytes) noexcept {
+    const std::size_t arena_bytes,
+    const bool layout_passed,
+    const DkResult layout_result,
+    const std::uint64_t layout_size,
+    const std::uint32_t layout_alignment,
+    const std::uint32_t layout_kind) noexcept {
     Session session;
     if (!session) {
         return;
     }
-    session.print("lsfg-nx: deko3d coexistence probe %s stage=%s value=0x%08x arena=%lu\n",
+    session.print("lsfg-nx: deko3d coexistence probe %s stage=%s value=0x%08x arena=%lu "
+                  "layout=%s/%d size=%lu align=%u kind=0x%x\n",
         passed ? "passed" : "failed",
         stage,
         value,
-        static_cast<unsigned long>(arena_bytes));
+        static_cast<unsigned long>(arena_bytes),
+        layout_passed ? "matched" : "refused",
+        static_cast<int>(layout_result),
+        layout_size,
+        layout_alignment,
+        layout_kind);
 }
 
 void on_swapchain(const instrument::SwapchainMap& map) noexcept {

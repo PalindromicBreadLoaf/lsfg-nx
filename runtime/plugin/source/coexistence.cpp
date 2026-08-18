@@ -25,6 +25,12 @@ constexpr std::size_t program_header_size = 64;
 constexpr std::size_t program_type_offset = 0;
 constexpr std::size_t per_warp_scratch_offset = 20;
 constexpr std::uint32_t compute_program_type = 5;
+constexpr std::uint32_t paper_mario_texture_format = 37;
+constexpr std::uint32_t paper_mario_texture_flags = 0x0d;
+constexpr std::uint32_t paper_mario_texture_target = 1;
+constexpr std::uint32_t paper_mario_pool_flags = 0xa1;
+constexpr std::uint32_t paper_mario_storage_class
+    = 0x100U | static_cast<std::uint32_t>(NvKind_C32_2CRA);
 
 struct DkshHeader {
     std::uint32_t magic;
@@ -113,13 +119,62 @@ void release(void* /*user*/, void* /*memory*/) {
     return rounded <= UINT32_MAX ? static_cast<std::uint32_t>(rounded) : 0;
 }
 
+[[nodiscard]] DkResult reconstruct_external_layout(
+    const DkDevice device, const ExternalLayout& external, DkImageLayout& out) noexcept {
+    if (!external.valid()
+        || external.format != paper_mario_texture_format
+        || external.flags != paper_mario_texture_flags
+        || external.target != paper_mario_texture_target
+        || external.pool_flags != paper_mario_pool_flags
+        || external.storage_class != paper_mario_storage_class
+        || external.depth != 1
+        || external.levels != 1
+        || external.samples != 0
+        || external.stride != 0
+        || external.storage_alignment > UINT32_MAX) {
+        return DkResult_BadInput;
+    }
+
+    DkImageLayoutMaker maker;
+    dkImageLayoutMakerDefaults(&maker, device);
+    maker.type = DkImageType_2D;
+    maker.flags = DkImageFlags_HwCompression
+        | DkImageFlags_UsageRender
+        | DkImageFlags_UsagePresent
+        | DkImageFlags_Usage2DEngine;
+    maker.format = DkImageFormat_RGBA8_Unorm;
+    maker.msMode = DkMsMode_1x;
+    maker.dimensions[0] = external.width;
+    maker.dimensions[1] = external.height;
+    maker.dimensions[2] = external.depth;
+    maker.mipLevels = external.levels;
+    dkImageLayoutInitialize(&out, &maker);
+
+    return dkImageLayoutApplyExternal(&out,
+        external.storage_class & UINT8_MAX,
+        external.storage_size,
+        static_cast<std::uint32_t>(external.storage_alignment));
+}
+
 } // namespace
+
+bool ExternalLayout::valid() const noexcept {
+    return width != 0
+        && height != 0
+        && storage_size != 0
+        && storage_alignment != 0
+        && (storage_alignment & (storage_alignment - 1U)) == 0
+        && storage_offset <= pool_size
+        && storage_size <= pool_size - storage_offset
+        && (storage_offset & (storage_alignment - 1U)) == 0;
+}
 
 const char* stage_name(const Stage stage) noexcept {
     switch (stage) {
     case Stage::not_started: return "not_started";
     case Stage::nvdrv_session: return "nvdrv_session";
     case Stage::device: return "device";
+    case Stage::external_layout: return "external_layout";
     case Stage::queue: return "queue";
     case Stage::code_memory: return "code_memory";
     case Stage::shader: return "shader";
@@ -138,7 +193,8 @@ const char* stage_name(const Stage stage) noexcept {
     return "unknown";
 }
 
-Result run(const ProgressCallback progress) noexcept {
+Result run(
+    const ExternalLayout& external_layout, const ProgressCallback progress) noexcept {
     Result result{};
     g_arena.used = 0;
     g_completion_fence = {};
@@ -151,6 +207,7 @@ Result run(const ProgressCallback progress) noexcept {
     DkCmdBuf commands{};
     DkshHeader header{};
     DkShader shader{};
+    DkImageLayout image_layout{};
     std::uint32_t code_bytes{};
     std::uint32_t per_warp_scratch{};
     std::uint32_t* output{};
@@ -182,6 +239,20 @@ Result run(const ProgressCallback progress) noexcept {
     notify(progress, result.stage);
     device = dkDeviceCreate(&device_maker);
     if (device == nullptr) {
+        goto done;
+    }
+
+    result.stage = Stage::external_layout;
+    result.layout_result
+        = reconstruct_external_layout(device, external_layout, image_layout);
+    result.layout_size = dkImageLayoutGetSize(&image_layout);
+    result.layout_alignment = dkImageLayoutGetAlignment(&image_layout);
+    result.layout_kind = dkImageLayoutGetNvKind(&image_layout);
+    result.layout_passed = result.layout_result == DkResult_Success
+        && result.layout_size == external_layout.storage_size
+        && result.layout_alignment == external_layout.storage_alignment
+        && result.layout_kind == (external_layout.storage_class & UINT8_MAX);
+    if (!result.layout_passed) {
         goto done;
     }
 
@@ -303,7 +374,7 @@ Result run(const ProgressCallback progress) noexcept {
     }
     result.stage = Stage::completed;
     result.value = *output;
-    result.passed = result.value == expected_value;
+    result.passed = result.value == expected_value && result.layout_passed;
     if (result.passed) {
         result.stage = Stage::verified;
     }

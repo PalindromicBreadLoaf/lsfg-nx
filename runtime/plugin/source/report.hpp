@@ -6,6 +6,8 @@
 #include <lsfg/instrument/presentation.hpp>
 #include <lsfg/common/error.hpp>
 
+#include <deko3d.h>
+
 #include <cstddef>
 #include <cstdint>
 
@@ -25,7 +27,15 @@ void on_coexistence_started() noexcept;
 void on_coexistence_progress(const char* stage) noexcept;
 
 void on_coexistence_finished(
-    const char* stage, bool passed, std::uint32_t value, std::size_t arena_bytes) noexcept;
+    const char* stage,
+    bool passed,
+    std::uint32_t value,
+    std::size_t arena_bytes,
+    bool layout_passed,
+    DkResult layout_result,
+    std::uint64_t layout_size,
+    std::uint32_t layout_alignment,
+    std::uint32_t layout_kind) noexcept;
 
 // The swapchain as it was declared, written once per window.
 void on_swapchain(const instrument::SwapchainMap& map) noexcept;
