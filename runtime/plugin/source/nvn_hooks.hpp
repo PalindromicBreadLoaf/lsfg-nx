@@ -11,6 +11,7 @@ namespace lsfg::plugin::nvn {
 
 struct Options {
     bool reporting_enabled{};
+    bool run_coexistence_probe{};
     // Reports the whole discovery trace.
     bool verbose_trace{};
     // Presents between pacing reports,.

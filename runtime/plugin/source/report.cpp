@@ -225,6 +225,35 @@ void on_queries_resolved(const std::uint32_t missing) noexcept {
     session.print("lsfg-nx: graphics queries resolved, %u absent\n", missing);
 }
 
+void on_coexistence_started() noexcept {
+    Session session;
+    if (session) {
+        session.print("lsfg-nx: deko3d coexistence probe started\n");
+    }
+}
+
+void on_coexistence_progress(const char* const stage) noexcept {
+    Session session;
+    if (session) {
+        session.print("lsfg-nx: deko3d coexistence probe stage=%s\n", stage);
+    }
+}
+
+void on_coexistence_finished(const char* const stage,
+    const bool passed,
+    const std::uint32_t value,
+    const std::size_t arena_bytes) noexcept {
+    Session session;
+    if (!session) {
+        return;
+    }
+    session.print("lsfg-nx: deko3d coexistence probe %s stage=%s value=0x%08x arena=%lu\n",
+        passed ? "passed" : "failed",
+        stage,
+        value,
+        static_cast<unsigned long>(arena_bytes));
+}
+
 void on_swapchain(const instrument::SwapchainMap& map) noexcept {
     Session session;
     if (!session) {

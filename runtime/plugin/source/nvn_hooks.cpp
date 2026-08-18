@@ -3,6 +3,7 @@
 
 #include "nvn_hooks.hpp"
 
+#include "coexistence.hpp"
 #include "imports.hpp"
 #include "nvn_api.hpp"
 #include "observations.hpp"
@@ -10,10 +11,13 @@
 
 #include <lsfg/instrument/presentation.hpp>
 
+#include <switch.h>
+
 #include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstring>
+#include <sys/reent.h>
 
 namespace lsfg::plugin::nvn {
 namespace {
@@ -83,6 +87,53 @@ Queries g_queries{};
 BootstrapLoader g_bootstrap{};
 DeviceGetProcAddress g_proc_address{};
 std::atomic<bool> g_engaged{false};
+std::atomic<bool> g_coexistence_ran{false};
+
+constexpr std::size_t coexistence_stack_size = 128U * 1024U;
+constexpr std::size_t newlib_reent_tls_offset = 0x1f0;
+constexpr std::int64_t coexistence_start_delay_ns = 1'000'000'000LL;
+
+Thread g_coexistence_thread{};
+alignas(0x1000) std::array<std::byte, coexistence_stack_size> g_coexistence_stack{};
+
+void report_coexistence_progress(const coexistence::Stage stage) noexcept {
+    report::on_coexistence_progress(coexistence::stage_name(stage));
+}
+
+void coexistence_worker(void*) {
+    report::on_coexistence_started();
+    svcSleepThread(coexistence_start_delay_ns);
+    const coexistence::Result result = coexistence::run(&report_coexistence_progress);
+    report::on_coexistence_finished(coexistence::stage_name(result.stage),
+        result.passed,
+        result.value,
+        result.arena_bytes);
+}
+
+[[nodiscard]] ::Result start_coexistence_worker() noexcept {
+    auto** const reent_slot = reinterpret_cast<_reent**>(
+        static_cast<std::byte*>(armGetTls()) + newlib_reent_tls_offset);
+    _reent* const saved_reent = *reent_slot;
+
+    *reent_slot = _impure_ptr != nullptr ? _impure_ptr : &_impure_data;
+    const ::Result created = threadCreate(&g_coexistence_thread,
+        &coexistence_worker,
+        nullptr,
+        g_coexistence_stack.data(),
+        g_coexistence_stack.size(),
+        0x2f,
+        -2);
+    *reent_slot = saved_reent;
+    if (R_FAILED(created)) {
+        return created;
+    }
+
+    const ::Result started = threadStart(&g_coexistence_thread);
+    if (R_FAILED(started)) {
+        threadClose(&g_coexistence_thread);
+    }
+    return started;
+}
 
 struct StagedTextures {
     const WindowBuilder* builder{};
@@ -326,6 +377,17 @@ void queue_present_texture(
 
     const auto original = chained<QueuePresentTexture>(Fn::queue_present_texture);
     original(queue, window, texture_index);
+
+    if (g_options.run_coexistence_probe
+        && !g_coexistence_ran.exchange(true, std::memory_order_relaxed)) {
+        const ::Result result = start_coexistence_worker();
+        if (R_FAILED(result)) {
+            report::on_coexistence_finished("worker_start",
+                false,
+                static_cast<std::uint32_t>(result),
+                0);
+        }
+    }
 
     report::on_present();
 }

@@ -3,6 +3,7 @@
 
 #include "deferred.hpp"
 #include "imports.hpp"
+#include "nv_session.hpp"
 #include "nvn_hooks.hpp"
 #include "report.hpp"
 
@@ -47,6 +48,7 @@ void* g_saved_lr = nullptr;
 constexpr std::string_view profile_root = "sdmc:/SaltySD/plugins/lsfg-nx/profiles";
 constexpr const char* log_flag = "sdmc:/SaltySD/flags/log.flag";
 constexpr const char* trace_flag = "sdmc:/switch/lsfg-nx/trace.flag";
+constexpr const char* coexistence_flag = "sdmc:/switch/lsfg-nx/coexist.flag";
 constexpr const char* permissive_flag = "sdmc:/switch/lsfg-nx/permissive.flag";
 constexpr const char* imports_dump = "sdmc:/switch/lsfg-nx/imports.txt";
 
@@ -58,6 +60,7 @@ std::array<char, lsfg::profile::max_text_size> g_profile_text{};
 lsfg::profile::Profile g_profile{};
 bool g_reporting_enabled{};
 bool g_verbose_trace{};
+bool g_run_coexistence_probe{};
 
 [[nodiscard]] bool flag_present(const char* const path) noexcept {
     FILE* const file = SaltySDCore_fopen(path, "r");
@@ -124,6 +127,7 @@ void report_import_survey() {
 void install_hooks() {
     lsfg::plugin::nvn::Options options{};
     options.reporting_enabled = g_reporting_enabled;
+    options.run_coexistence_probe = g_run_coexistence_probe;
     options.verbose_trace = g_verbose_trace;
     options.report_every = options.verbose_trace ? trace_report_period : 0;
 
@@ -197,6 +201,16 @@ int main() {
         g_reporting_enabled = false;
     } else if (g_reporting_enabled) {
         SaltySDCore_printf("lsfg-nx: shared report transport ready\n");
+    }
+
+    g_run_coexistence_probe = g_reporting_enabled && flag_present(coexistence_flag);
+    if (g_run_coexistence_probe) {
+        const lsfg::plugin::nv_session::ArmResult capture
+            = lsfg::plugin::nv_session::arm();
+        SaltySDCore_printf(
+            "lsfg-nx: deko3d coexistence probe armed. nvdrv capture %s value=0x%08x\n",
+            capture.armed ? "armed" : "unavailable",
+            static_cast<unsigned>(capture.value));
     }
 
     report_import_survey();

@@ -6,6 +6,7 @@
 #include <lsfg/instrument/presentation.hpp>
 #include <lsfg/common/error.hpp>
 
+#include <cstddef>
 #include <cstdint>
 
 namespace lsfg::plugin::report {
@@ -18,6 +19,13 @@ void configure(
 void on_install(ErrorCode result) noexcept;
 
 void on_queries_resolved(std::uint32_t missing) noexcept;
+
+void on_coexistence_started() noexcept;
+
+void on_coexistence_progress(const char* stage) noexcept;
+
+void on_coexistence_finished(
+    const char* stage, bool passed, std::uint32_t value, std::size_t arena_bytes) noexcept;
 
 // The swapchain as it was declared, written once per window.
 void on_swapchain(const instrument::SwapchainMap& map) noexcept;
